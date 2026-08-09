@@ -125,6 +125,7 @@ class Monitor:
         prints = results["footprints"]
         for proc in procs:
             proc.footprint = prints.get(proc.pid, 0)
+        collect.resolve_owners(procs)
 
         by_pid = {p.pid: p for p in procs}
         roots = cfg.get("project_roots", [])
@@ -519,7 +520,8 @@ def _draw_process_table(c: Canvas, rows: list, cfg: dict, key: str) -> None:
             "age": (human_duration(proc.age_seconds), t.dim),
             "bar": ("█" * filled + "░" * (bar_w - filled), bar_color),
             "name": (
-                f"{proc.name} ×{proc.children + 1}" if proc.children > 2 else proc.name,
+                f"{proc.display_name} ×{proc.children + 1}"
+                if proc.children > 2 else proc.display_name,
                 t.value,
             ),
         })
@@ -888,6 +890,7 @@ def to_json(snap: dict) -> str:
         row = dataclasses.asdict(p)
         row["cpu"] = round(p.cpu, 1)
         row["age_seconds"] = round(p.age_seconds)
+        row["memory"] = p.memory
         return row
 
     payload = {
@@ -909,7 +912,9 @@ def to_json(snap: dict) -> str:
         "containers": [dataclasses.asdict(item) for item in snap["containers"]],
         "alerts": [dataclasses.asdict(item) for item in snap["alerts"]],
         "top_cpu": [proc(p) for p in sorted(snap["processes"], key=lambda p: p.cpu, reverse=True)[:15]],
-        "top_ram": [proc(p) for p in sorted(snap["processes"], key=lambda p: p.rss, reverse=True)[:15]],
+        # Ranked by footprint, matching the rendered table: RSS put the largest
+        # consumer on this machine fourth, which is the whole reason MEM exists.
+        "top_ram": [proc(p) for p in sorted(snap["processes"], key=lambda p: p.memory, reverse=True)[:15]],
     }
     return json.dumps(payload, indent=2, default=encode)
 

@@ -174,6 +174,17 @@ def scenario_huge_values(cfg):
     return snap
 
 
+def scenario_shared_helper(cfg):
+    """A framework XPC helper whose executable name names no app at all."""
+    snap = base_snapshot()
+    snap["processes"].append(collect.Process(
+        pid=37870, name="com.apple.Virtualization.VirtualMachine", owner="Docker",
+        rss=654 * 2**20, footprint=4105 * 2**20, cpu=10.9,
+        age_seconds=421000.0, ppid=1,
+    ))
+    return snap
+
+
 SCENARIOS = {
     "healthy": scenario_healthy,
     "hot": scenario_hot,
@@ -185,6 +196,7 @@ SCENARIOS = {
     "no-memory-source": scenario_no_memory_source,
     "empty-machine": scenario_empty_machine,
     "huge-values": scenario_huge_values,
+    "shared-helper": scenario_shared_helper,
 }
 
 
@@ -264,6 +276,21 @@ def check(name: str, colored: str, plain: str, cfg: dict, snap: dict) -> list[st
     if name == "huge-values":
         if "65535" not in plain:
             problems.append("a max-value port was dropped")
+
+    if name == "shared-helper":
+        helper = next(p for p in snap["processes"] if p.pid == 37870)
+        # The owner leads the name precisely so it survives column truncation.
+        if "Docker · com.apple.Virtualization" not in plain:
+            problems.append("a shared helper rendered without its owning app")
+        # The kill path re-reads `ps comm=` and compares it to this field, so a
+        # decorated name here would refuse every kill as if the pid were reused.
+        if helper.name != "com.apple.Virtualization.VirtualMachine":
+            problems.append(f"Process.name was rewritten to {helper.name!r}")
+        top_ram = plain.split("TOP RAM")[-1].splitlines()
+        first = next((ln for ln in top_ram if "37870" in ln), "")
+        if not first or first.strip() != next(ln.strip() for ln in top_ram if ln.strip()
+                                              and ln.strip()[0].isdigit()):
+            problems.append("a 4G footprint did not rank first in TOP RAM")
 
     return problems
 

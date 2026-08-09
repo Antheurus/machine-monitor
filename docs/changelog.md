@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.0.1 — The mystery 4 GB process now tells you which app it belongs to
+
+- **The biggest memory hog is no longer anonymous.** A process called
+  `com.apple.Virtualization.VirtualMachine` regularly sits at the top of TOP RAM using several
+  gigabytes. That name comes from a macOS framework, not from any app you installed — Docker Desktop,
+  UTM, Podman and others all show up under it, so there was no way to tell which one to quit. It now
+  reads `Docker · com.apple.Virtualization.VirtualMachine`, naming the real owner.
+- **`--json` was ranking TOP RAM the wrong way.** It sorted by RSS while the on-screen table sorted by
+  actual memory footprint, so the two could disagree about which process was worst — and RSS is the
+  measurement that hides compressed processes. Both now use footprint, and each row includes a
+  `memory` field so you can see the number it was ranked on.
+- No action required after updating.
+
 ## v2.0.0 — Real temperatures, honest memory, a full Python rewrite, and a lot more
 
 ### New in this release

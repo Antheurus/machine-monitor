@@ -254,6 +254,7 @@ class Process:
     footprint: int = 0
     ppid: int = 0
     children: int = 0
+    owner: str = ""
 
     @property
     def memory(self) -> int:
@@ -266,6 +267,16 @@ class Process:
         fourth when it was in fact the largest consumer on the system.
         """
         return self.footprint or self.rss
+
+    @property
+    def display_name(self) -> str:
+        """Owner first, so a truncated column still names the app.
+
+        `name` itself is never rewritten: actions.refuse_reason re-reads `ps
+        comm=` and compares it against the caller's copy, so a decorated name
+        would make every kill of a resolved helper look like pid reuse.
+        """
+        return f"{self.owner} · {self.name}" if self.owner else self.name
 
 
 def _parse_etime(value: str) -> float:
@@ -380,6 +391,56 @@ def footprints() -> dict[int, int]:
             continue
         result[int(parts[0])] = int(value)
     return result
+
+
+# Shared XPC helpers, whose executable name identifies the framework rather than
+# the app that asked for it — and launchd reparents them, so ppid is dead too.
+GENERIC_HELPERS = frozenset({
+    "com.apple.Virtualization.VirtualMachine",
+})
+
+_APP_BUNDLE = re.compile(r"/([^/]+)\.app/")
+_owner_cache: dict[tuple[int, str], str] = {}
+
+
+def owner_app(pid: int, name: str = "") -> str:
+    """Which app spawned a shared helper, read from the files it holds open.
+
+    The most frequently referenced bundle wins rather than the first one seen: a
+    helper incidentally reads a font or a resource out of some other app, and a
+    first-match rule would report that instead. Returns '' when nothing in the
+    fd table points at a bundle, which is a normal answer, not a failure.
+    """
+    cached = _owner_cache.get((pid, name))
+    if cached is not None:
+        return cached
+    try:
+        # lsof exits non-zero when any single fd is unreadable, so stdout is
+        # taken regardless of return code rather than through run().
+        proc = subprocess.run(
+            ["lsof", "-p", str(pid), "-Fn"],
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    tally: dict[str, int] = {}
+    for line in proc.stdout.splitlines():
+        if not line.startswith("n/") or line.startswith("n/System/"):
+            continue
+        match = _APP_BUNDLE.search(line)
+        if match:
+            bundle = match.group(1)
+            tally[bundle] = tally.get(bundle, 0) + 1
+    owner = max(tally, key=lambda k: tally[k]) if tally else ""
+    _owner_cache[(pid, name)] = owner
+    return owner
+
+
+def resolve_owners(procs: list[Process]) -> None:
+    """Attach an owning app to every generic helper in `procs`, in place."""
+    for proc in procs:
+        if proc.name in GENERIC_HELPERS:
+            proc.owner = owner_app(proc.pid, proc.name)
 
 
 # ── throughput ───────────────────────────────────────────────────────────────

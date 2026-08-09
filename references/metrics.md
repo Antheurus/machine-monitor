@@ -27,6 +27,30 @@ of 60 sampled — because it needs a private codesign entitlement that only Appl
 RSS still has one honest use: a footprint far above it is the signal that the process has been
 compressed or swapped, which is exactly what the orange highlight marks.
 
+## Process name — a framework helper names no app
+
+`com.apple.Virtualization.VirtualMachine` is the XPC service Apple's Virtualization.framework spawns
+on behalf of *whichever* app asked for a VM: Docker Desktop, UTM in its Apple-VZ mode, Podman,
+VirtualBuddy. The executable name identifies the framework, and launchd reparents the service so its
+`ppid` is 1 — so both of the usual attribution routes are dead, while the row itself sits at the top
+of the RAM table at 4 GB. A reader therefore names whichever VM app they remember installing, and on
+this machine that produced a confident, wrong "UTM is your biggest hog" for an app that had already
+been uninstalled. It was Docker Desktop.
+
+The tool resolves the owner from the files the helper holds open — `lsof -p <pid> -Fn`, then the most
+frequently referenced `*.app` bundle outside `/System`, which for this process is
+`/Applications/Docker.app/Contents/Resources/linuxkit/kernel` and its `Docker.raw` disk image. Most
+frequent rather than first-seen, because a helper incidentally reads a font or resource out of some
+unrelated bundle. Rendered as `Docker · com.apple.Virtualization.VirtualMachine`, owner first so the
+attribution survives the column truncating the tail.
+
+Two constraints on any change here. `Process.name` stays the raw `comm` and the owner lives in its
+own field: `actions.refuse_reason` re-reads `ps comm=` and compares it against the caller's copy to
+catch pid reuse, so a decorated name makes every kill of a resolved helper refuse itself with
+`pid now belongs to com.apple.Virtualization.VirtualMachine, not Docker · com.apple.…`. And `lsof`
+exits non-zero whenever any single fd is unreadable, so its stdout is read regardless of return code
+rather than through `run()`, which returns `''` on a non-zero exit.
+
 ## CPU per process — live, not lifetime
 
 `ps aux`'s `%CPU` is an average over the entire life of the process. For a dev server running four

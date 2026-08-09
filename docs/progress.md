@@ -1,5 +1,53 @@
 # machine-monitor Progress
 
+## Session — 2026-08-09 (cont) — v2.0.1 (attribute shared framework helpers to their owning app)
+
+The user asked for a temperature check, got a clean thermal report (CPU die 50 °C, GPU 53 °C,
+pressure Nominal) alongside a swap emergency (95% of 14 G), and then caught a wrong attribution in
+the answer: the 4.0 G row at the top of TOP RAM was reported as UTM, and UTM had been uninstalled.
+Root cause is that `com.apple.Virtualization.VirtualMachine` is Apple's shared Virtualization.framework
+XPC service — the executable name identifies the *framework*, and launchd reparents the service so
+its `ppid` is 1, killing both of the usual attribution routes. Docker Desktop, UTM's Apple-VZ mode,
+Podman and VirtualBuddy all present as that same anonymous multi-gigabyte process, so the row that
+matters most on a memory-pressured machine is the one row nobody can name. Here it was Docker
+Desktop, proved from the fd table: `/Applications/Docker.app/Contents/Resources/linuxkit/kernel` and
+`~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw`, both held open by pid 37870,
+with no `UTM.app` present anywhere and no `qemu`/`utmd` running (only an empty 32 KB
+`com.utmapp.QEMUHelper` container left behind by the uninstall).
+
+The fix is a `GENERIC_HELPERS` registry in `collect.py` plus `owner_app(pid)`, which reads
+`lsof -p <pid> -Fn` and takes the **most frequently referenced** `*.app` bundle outside `/System` —
+most-frequent rather than first-seen because a helper incidentally opens a font or resource from an
+unrelated bundle. Results are cached on `(pid, name)`, and the cost is 25 ms for the one process on
+this machine that matches. Two traps closed while building it. `lsof` exits non-zero whenever any
+single fd is unreadable, and the module's `run()` helper returns `''` on a non-zero exit, so the
+resolver calls `subprocess.run` directly and reads stdout regardless of return code. More
+importantly, the owner is a **new field** rather than a rewrite of `Process.name`: `actions.refuse_reason`
+re-reads `ps comm=` and compares it against the caller's copy to catch pid reuse, so decorating the
+name would have made every kill of a resolved helper refuse itself with `pid now belongs to
+com.apple.Virtualization.VirtualMachine, not Docker · com.apple.…` — a fabricated pid-reuse warning
+on the kill path. That was verified by calling `refuse_reason` both ways: raw name returns `''`,
+decorated name returns the bogus refusal. Rendering composes `display_name` as `owner · name`, owner
+first so the attribution survives the PROCESS column truncating the tail at 45 chars.
+
+A second, independent defect surfaced in the same area: `to_json` ranked `top_ram` by `p.rss` while
+the rendered table ranks by `p.memory` (footprint), so the JSON output — the mode the skill's own
+SKILL.md recommends for answering questions — used exactly the ranking the docs call structurally
+unable to find the largest consumer. It now sorts by footprint and emits a `memory` field, since
+`dataclasses.asdict` skips the property the sort is based on.
+
+Verified: `tests/eval_scenarios.py` 11/11 (a new `shared-helper` scenario asserts the owner renders,
+that `Process.name` is *not* rewritten, and that a 4 G footprint ranks first in TOP RAM), and the new
+scenario was run against `HEAD`'s scripts in `/tmp/mm_pre` — it fails there with "a shared helper
+rendered without its owning app", so the check can distinguish. Live: TOP RAM now shows
+`Docker · com.apple.Virtualization.VirtualMach…` at 4.0 G, and `--json` reports
+`owner='Docker', memory=4105M, rss=543M`. Files: `scripts/collect.py`, `scripts/main.py`,
+`tests/eval_scenarios.py`, `references/metrics.md`. Follow-up: `GENERIC_HELPERS` holds one entry;
+`com.apple.WebKit.WebContent` is the obvious second, but no instance was running to verify against,
+and this corpus does not document unverified behaviour.
+
+---
+
 ## Session — 2026-08-09 (cont) — v2.0.0 (live-mode latency: ~3s → 3ms)
 
 The user reported that live mode waits three seconds after every keypress and called it a design
