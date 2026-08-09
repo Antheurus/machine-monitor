@@ -17,11 +17,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
+import actions  # noqa: E402
 import collect  # noqa: E402
 import config as config_mod  # noqa: E402
 import main as app  # noqa: E402
@@ -295,6 +298,155 @@ def check(name: str, colored: str, plain: str, cfg: dict, snap: dict) -> list[st
     return problems
 
 
+def unit_checks() -> list[str]:
+    """Non-render invariants: session grouping and the kill guard.
+
+    These cannot be asserted on a rendered dashboard — grouping is about a
+    process tree the renderer never sees, and the guard's whole job is to refuse
+    before anything is drawn.
+    """
+    problems: list[str] = []
+    chrome = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    helper = "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Helper"
+    profile = "/var/folders/zz/T/playwright" + "_chromiumdev_profile-AbCdEf"
+
+    fake_tree = {
+        1: (0, "/sbin/launchd"),
+        900: (1, "node /opt/x/playwright-core/lib/entry/cliDaemon.js mysession"),
+        901: (900, f"{chrome} --user-data-dir={profile} --headless"),
+        902: (901, f"{helper} --type=renderer"),        # carries NO marker
+        903: (901, f"{helper} --type=gpu-process"),     # carries NO marker
+        910: (1, f"{chrome} --window-size=1200,800"),   # the human's own browser
+        920: (1, "Cursor Helper: mcp-process"),
+        930: (1, "node /opt/homebrew/bin/gitnexus mcp"),
+    }
+    original = collect._ps_tree
+    collect._ps_tree = lambda: fake_tree
+    try:
+        found = collect.sessions([], {})
+    finally:
+        collect._ps_tree = original
+
+    by_root = {s.root_pid: s for s in found}
+
+    if 900 not in by_root:
+        problems.append("the playwright daemon was not detected as a session root")
+    else:
+        session = by_root[900]
+        # The point of ancestry: helpers do not repeat --user-data-dir, and an
+        # argv-only classifier files them as the human's own browser.
+        for pid in (901, 902, 903):
+            if pid not in session.pids:
+                problems.append(f"pid {pid} was not claimed by its session root")
+        if 901 in by_root:
+            problems.append("the browser under the daemon became its own session")
+
+    if 910 in by_root or any(910 in s.pids for s in found):
+        problems.append("the human's own Chrome was swept into a session")
+    if 920 in by_root:
+        problems.append("'Cursor Helper: mcp-process' matched the bare token 'mcp'")
+    if 930 not in by_root:
+        problems.append("a real 'gitnexus mcp' server was not detected")
+    elif by_root[930].detail != "gitnexus mcp":
+        problems.append(f"mcp session detail reads {by_root[930].detail!r}, not 'gitnexus mcp'")
+
+    # The guard, driven against a real process rather than reasoned about, and
+    # in BOTH directions — a check that only ever refuses proves nothing.
+    victim = subprocess.Popen(["sleep", "30"])
+    try:
+        time.sleep(0.2)
+        allowed = actions.refuse_reason(victim.pid, "", "sleep")
+        if allowed:
+            problems.append(f"argv guard refused a mark the process HAS: {allowed!r}")
+        refused = actions.refuse_reason(victim.pid, "", "mark-it-cannot-carry")
+        if "pid was reused" not in refused:
+            problems.append(f"argv guard allowed a missing mark, said {refused!r}")
+    finally:
+        victim.kill()
+        victim.wait()
+
+    problems.extend(_check_whole_session_is_targeted())
+    problems.extend(_check_identity_parsing())
+    return problems
+
+
+def _check_whole_session_is_targeted() -> list[str]:
+    """A real parent+child, to prove the kill path targets EVERY pid.
+
+    Two separate near-misses made a session of 7 plan only its root: the guard
+    compared each helper against the ROOT's name, and then a name derived by
+    splitting argv on the first space turned `Google Chrome Helper (GPU)` into
+    `Google`. Both refused every descendant while reporting success for the
+    root, which reads as a session that was cleaned up and was not.
+    """
+    problems: list[str] = []
+    mark = "MMTEST" + "SESSIONMARK"
+    parent = subprocess.Popen(["/bin/sh", "-c", f"sleep 30 & wait", mark])
+    try:
+        time.sleep(0.4)
+        found = collect.sessions(collect.ProcessSampler().sample(0.2),
+                                 {"process_families": {"unit-test": [mark]}})
+        session = next((s for s in found if s.root_pid == parent.pid), None)
+        if session is None:
+            problems.append("a live parent+child was not detected as a session")
+            return problems
+        if len(session.pids) < 2:
+            problems.append(f"session claimed {len(session.pids)} pids, not the child too")
+        for pid in session.pids:
+            if pid not in session.names or pid not in session.starts:
+                problems.append(f"pid {pid} has no per-pid name/start for the kill guard")
+
+        targets = [
+            (pid, session.names.get(pid, ""), session.mark if pid == session.root_pid else "",
+             session.starts.get(pid, ""))
+            for pid in session.pids
+        ]
+        results = actions.terminate_all(targets, confirm=True, dry_run=True)
+        planned = [r for r in results if r.outcome == "planned"]
+        if len(planned) != len(session.pids):
+            refused = [f"{r.pid}: {r.detail}" for r in results if r.outcome != "planned"]
+            problems.append(
+                f"dry run planned {len(planned)} of {len(session.pids)} pids — {refused}")
+    finally:
+        parent.kill()
+        parent.wait()
+        subprocess.run(["/usr/bin/pkill", "-f", mark], check=False)
+    return problems
+
+
+def _check_identity_parsing() -> list[str]:
+    """`_identity` against crafted `ps` output, where a real process cannot go.
+
+    An executable name containing spaces is the case that matters — the guard
+    compares this string, so truncating `Google Chrome Helper (GPU)` at the
+    first space makes it refuse its own target. It cannot be covered by
+    spawning something: macOS SIGKILLs a copied system binary on signature
+    check, so the process is `<defunct>` before `ps` ever sees it.
+    """
+    problems: list[str] = []
+    spaced = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome Helper (GPU)"
+    fake = f"  501 Mon Aug 10 00:19:39 2026 {spaced}\n  1 Sat Aug  2 07:00:01 2026 /sbin/launchd\n"
+
+    original = collect.run
+    collect.run = lambda cmd, timeout=5.0: fake if "lstart=" in " ".join(cmd) else ""
+    try:
+        found = collect._identity()
+    finally:
+        collect.run = original
+
+    if 501 not in found:
+        problems.append("_identity dropped a row whose executable name has spaces")
+        return problems
+    start, name = found[501]
+    if name != "Google Chrome Helper (GPU)":
+        problems.append(f"executable name parsed as {name!r}, truncated at a space")
+    if start != "Mon Aug 10 00:19:39 2026":
+        problems.append(f"lstart parsed as {start!r}")
+    if found.get(1, ("", ""))[1] != "launchd":
+        problems.append("a single-digit-day lstart row was misparsed")
+    return problems
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--show", metavar="SCENARIO", help="print one scenario's rendering")
@@ -339,6 +491,16 @@ def main() -> int:
             print(f"ok   {name:<18} {len(plain.splitlines()):>3} lines rendered")
 
     print(f"\n{len(SCENARIOS) - failures}/{len(SCENARIOS)} scenarios passed")
+
+    unit = unit_checks()
+    if unit:
+        failures += 1
+        print("\nFAIL unit checks (sessions + kill guard)")
+        for problem in unit:
+            print(f"     {problem}")
+    else:
+        print("ok   unit checks       sessions grouped by ancestry, kill guard anchored to argv")
+
     return 1 if failures else 0
 
 

@@ -653,6 +653,55 @@ def draw_orphans(c: Canvas, orphans: list) -> None:
     c.wrapped("Kill a whole session with:  machine-monitor --kill-orphans", t.accent)
 
 
+def sample_with_footprints(monitor) -> list:
+    """A process sample whose MEM is the footprint, not RSS.
+
+    `ProcessSampler` fills RSS only; the footprint is a separate `top` read that
+    the full snapshot merges in. Every one-shot mode skipped that merge, so
+    `Process.memory` silently fell back to RSS — the orphan view reported a
+    2.70 G pile of leftover browsers as 1.2 G, and a compressed 2.2 G process as
+    3.8 M. Any mode that shows or sums memory goes through here.
+    """
+    procs = monitor.processes.sample(0.3)
+    prints = collect.footprints()
+    for proc in procs:
+        proc.footprint = prints.get(proc.pid, 0)
+    return procs
+
+
+def draw_sessions(c: Canvas, found: list, family: str = "") -> None:
+    t = c.t
+    total_procs = sum(len(s.pids) for s in found)
+    total_mem = sum(s.memory for s in found)
+    c.section(
+        "PROCESS SESSIONS",
+        f"{len(found)} session(s), {total_procs} processes, {human_bytes(total_mem)}"
+        + (f" — family {family}" if family else ""),
+    )
+    if not found:
+        c.raw(f"  {t.ok}✓{t.reset} {t.dim}no matching process families running{t.reset}")
+        return
+
+    specs = [
+        Column("age", "AGE", 8, "right", priority=9),
+        Column("procs", "PROCS", 6, "right", priority=7),
+        Column("mem", "MEM", 8, "right", priority=8),
+        Column("root", "ROOT PID", 9, "right", priority=9),
+        Column("family", "FAMILY", 19, "left", priority=8),
+        Column("detail", "SESSION", 30, "left", priority=9),
+    ]
+    c.table(specs, [{
+        "age": (human_duration(s.age_seconds), t.warn if s.age_seconds > 86400 else t.label),
+        "procs": (str(len(s.pids)), t.value),
+        "mem": (human_bytes(s.memory), t.info),
+        "root": (str(s.root_pid), t.pid),
+        "family": (s.family, t.accent),
+        "detail": (s.detail, t.dim),
+    } for s in found])
+    c.raw("")
+    c.wrapped("Kill one session with:  machine-monitor --kill-session <ROOT PID>", t.accent)
+
+
 def draw_history(c: Canvas, store, hours: float) -> None:
     t = c.t
     c.section("HISTORY", f"last {hours:g}h — recorded every time the dashboard runs")
@@ -1054,6 +1103,10 @@ def main() -> int:
                         help="report reclaimable disk space and exit (slow: walks project trees)")
     parser.add_argument("--orphans", action="store_true",
                         help="list leftover automation browser sessions and exit")
+    parser.add_argument("--sessions", nargs="?", const="", metavar="FAMILY",
+                        help="list process-family sessions (optionally one FAMILY) and exit")
+    parser.add_argument("--kill-session", action="append", type=int, metavar="ROOT_PID",
+                        default=[], help="terminate one session by its root pid; repeatable")
     parser.add_argument("--history", nargs="?", const=24.0, type=float, metavar="HOURS",
                         help="show recorded trends over HOURS (default 24) and exit")
     parser.add_argument("--save", metavar="NAME",
@@ -1067,7 +1120,7 @@ def main() -> int:
     parser.add_argument("--kill-orphans", action="store_true",
                         help="terminate leftover automation browser sessions")
     parser.add_argument("--yes", action="store_true",
-                        help="skip the typed confirmation for --reclaim and --kill-orphans")
+                        help="skip the typed confirmation for the terminating modes")
     parser.add_argument("--dry-run", action="store_true",
                         help="with --reclaim or --kill-orphans, show targets and signal nothing")
     parser.add_argument("--check", action="store_true",
@@ -1125,7 +1178,7 @@ def main() -> int:
 
     if args.orphans:
         canvas = Canvas(theme_early, render.term_width())
-        draw_orphans(canvas, collect.orphan_automation(monitor.processes.sample(0.3)))
+        draw_orphans(canvas, collect.orphan_automation(sample_with_footprints(monitor)))
         print(canvas.render())
         return 0
 
@@ -1137,8 +1190,41 @@ def main() -> int:
             print("no new alert conditions")
         return 0
 
+    if args.sessions is not None:
+        found = collect.sessions(sample_with_footprints(monitor), cfg)
+        if args.sessions:
+            found = [s for s in found if s.family == args.sessions]
+        canvas = Canvas(theme_early, render.term_width())
+        draw_sessions(canvas, found, args.sessions)
+        print(canvas.render())
+        return 0
+
+    if args.kill_session:
+        found = {s.root_pid: s for s in collect.sessions(sample_with_footprints(monitor), cfg)}
+        chosen, unknown = [], []
+        for root in args.kill_session:
+            (chosen.append(found[root]) if root in found else unknown.append(root))
+        for root in unknown:
+            print(f"no session rooted at pid {root} — run --sessions for the current list")
+        if not chosen:
+            return 1
+        canvas = Canvas(theme_early, render.term_width())
+        draw_sessions(canvas, chosen)
+        print(canvas.render())
+        if not confirm_destructive(sum(len(s.pids) for s in chosen), "terminate", args.yes):
+            return 1
+        # Only the root carries the family's argv mark; a helper's argv is
+        # indistinguishable from the user's own. Every pid carries its start
+        # time, which identifies the instance and so settles pid reuse.
+        targets = [
+            (pid, s.names.get(pid, ""), s.mark if pid == s.root_pid else "",
+             s.starts.get(pid, ""))
+            for s in chosen for pid in s.pids
+        ]
+        return report_kills(actions.terminate_all(targets, confirm=True, dry_run=args.dry_run))
+
     if args.kill_orphans:
-        orphans = collect.orphan_automation(monitor.processes.sample(0.3))
+        orphans = collect.orphan_automation(sample_with_footprints(monitor))
         canvas = Canvas(theme_early, render.term_width())
         draw_orphans(canvas, orphans)
         print(canvas.render())

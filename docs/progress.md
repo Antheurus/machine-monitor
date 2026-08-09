@@ -1,5 +1,65 @@
 # machine-monitor Progress
 
+## Session — 2026-08-10 — v2.1.0 (process-family sessions, and a kill guard that actually guards)
+
+Started as a request to kill leftover test/Playwright Chromes without touching the user's own
+browser. A throwaway script did that job — 7 sessions, 40 processes, 2.70 G, `default` deliberately
+spared — and the user then asked why the capability was not general. It is now part of the tool that
+already owned this job rather than a second skill beside it, because `machine-monitor` had
+`--orphans`, `--kill-orphans` and the kill contract in `actions.py`, and one of them was unsafe.
+
+**The guard did not guard.** `actions.refuse_reason` catches pid reuse by comparing `ps comm=`
+against the caller's copy. Every process of a multi-process app shares one executable, so the user's
+Chrome and a Playwright Chrome both report
+`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome` — byte-identical. Driven against the
+live machine with pid 462 (the human's 7-day-old browser) and the name a caller would have captured
+from an automation Chrome, the old guard returned `''`: it **permitted** signalling the user's
+browser. `refuse_reason` now also takes `expected_start` (the process's `lstart`, which identifies
+an instance and so settles reuse outright, and works for a helper whose argv is indistinguishable)
+and `expected_argv_mark` (a literal only the intended target carries, which catches a caller
+confusing two live processes). Same probe, new guard: refused, while still allowing the genuine
+automation pid — a check that only ever refuses proves nothing.
+
+**Grouping moved from argv to ancestry.** `orphan_automation` matched each process on its own argv,
+and a browser's helpers do not repeat `--user-data-dir`, so 8 of 40 automation processes classified
+as the human's own Chrome. `collect.sessions()` matches only a *root* on argv and claims every
+descendant by parentage, absorbing a root that sits under another root — which folds a Playwright
+daemon and the browser it launched into one session instead of two. Families are data
+(`[process_families]` in `config.ini`), shipping `automation-browser` and `mcp-server`, both verified
+live rather than imagined. A marker prefixed `=` must equal a whole argv token: the bare substring
+`mcp` also matched `Cursor Helper: mcp-process`, i.e. the user's editor. New `--sessions [family]`
+audits and `--kill-session <root-pid>` removes one, which `--kill-orphans` could not do — it is
+all-or-nothing, and the whole point here was sparing one live session.
+
+**Three bugs found while verifying, each of which looked like success.** A blanket string replace
+routing call sites through a new `sample_with_footprints` helper rewrote the helper's own body into
+a self-call; caught by an AST check for recursion rather than by reading. Then the dry run reported
+`1 process(es) would be terminated` for a 7-process session — twice, for two different reasons. The
+session's root binary was passed as `expected_name` for every pid, so each descendant refused with
+`pid now belongs to Google Chrome, not node`; and after fixing that, a name derived by splitting
+argv on the first space turned `Google Chrome Helper (GPU)` into `Google` and every descendant
+refused again. That second one is the trap `ProcessSampler`'s own docstring already warns about,
+reintroduced. Both reported the root as terminated, which reads as a cleaned-up session and is not.
+Names and start times now come from one `ps -eo pid=,lstart=,comm=` read, basenamed as a whole.
+
+**A separate defect surfaced in the same area**: every one-shot mode sampled processes without
+merging footprints, so `Process.memory` silently fell back to RSS. The orphan view reported a 2.70 G
+pile of leftover browsers as 1.2 G, and a compressed 2.2 G MCP server as 3.8 M — 580× low. All four
+one-shot call sites now go through `sample_with_footprints`.
+
+Verified: `tests/eval_scenarios.py` 11/11 plus a new unit-check phase covering ancestry grouping,
+the user's own Chrome staying out of every session, the `Cursor Helper: mcp-process` false positive,
+the argv guard in both directions against a real spawned process, whole-session targeting on a live
+parent+child, and `_identity` parsing a spaced executable name. Each new check was proved against a
+reintroduced bug in a throwaway copy: root-name gives `dry run planned 1 of 2 pids`, space-split
+gives `executable name parsed as 'Google'`. A spaced-name process cannot be spawned to test the
+latter — macOS SIGKILLs a copied system binary on signature check and it is `<defunct>` before `ps`
+sees it — so that one asserts on crafted `ps` output instead. Live: `--sessions` shows 17 sessions
+/ 3.9 G with the Playwright session correctly folded to 7 processes; `--kill-session 79985
+--dry-run` plans all 7. Follow-up: an interactive session picker in live mode (`-d`) was scoped out.
+
+---
+
 ## Session — 2026-08-09 (cont) — v2.0.1 (attribute shared framework helpers to their owning app)
 
 The user asked for a temperature check, got a clean thermal report (CPU die 50 °C, GPU 53 °C,

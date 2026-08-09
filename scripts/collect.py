@@ -1202,6 +1202,170 @@ def orphan_automation(procs: list[Process]) -> list[Orphan]:
 
 
 @dataclass
+class Session:
+    """One process family instance: a root and everything it spawned."""
+
+    family: str
+    root_pid: int
+    mark: str
+    detail: str
+    binary: str
+    pids: list[int] = field(default_factory=list)
+    names: dict[int, str] = field(default_factory=dict)
+    starts: dict[int, str] = field(default_factory=dict)
+    age_seconds: float = 0.0
+    memory: int = 0
+
+
+# Families ship as data so adding one is a config entry, never a code change.
+# A marker prefixed `=` must equal a whole argv token; anything else is a plain
+# substring. Both forms are needed: a profile path is a fragment, while the bare
+# word `mcp` as a substring also matched `Cursor Helper: mcp-process`.
+DEFAULT_FAMILIES: dict[str, list[str]] = {
+    "automation-browser": [
+        "playwright" + "_chromiumdev", ".playwright" + "-mcp", "puppeteer" + "_dev",
+        "chromedriver", "--enable-" + "automation", "cliDaemon.js",
+    ],
+    "mcp-server": ["mcp" + "-server", "=mcp"],
+}
+
+
+def _marker_hit(args: str, marker: str) -> str:
+    """The literal that matched, or '' — `=tok` is whole-token, else substring."""
+    if marker.startswith("="):
+        token = marker[1:]
+        return token if token in args.split() else ""
+    return marker if marker in args else ""
+
+
+def _ps_tree() -> dict[int, tuple[int, str]]:
+    """pid -> (ppid, argv), from one call."""
+    out = run(["ps", "-eo", "pid=,ppid=,args="], timeout=8)
+    tree: dict[int, tuple[int, str]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            tree[int(parts[0])] = (int(parts[1]), parts[2])
+    return tree
+
+
+def _identity() -> dict[int, tuple[str, str]]:
+    """pid -> (lstart, executable basename), the pair the kill guard re-checks.
+
+    `lstart` identifies a process INSTANCE, which is what settles pid reuse;
+    argv cannot, because a browser helper's `--type=gpu-process` is exactly what
+    the user's own Chrome helpers say. `lstart` is always 5 whitespace-separated
+    tokens, so the name is everything after them — and it is basenamed as a
+    whole rather than split on space, or `Google Chrome Helper (GPU)` becomes
+    `Google` and every name check then refuses its own target.
+    """
+    out = run(["ps", "-eo", "pid=,lstart=,comm="], timeout=8)
+    found: dict[int, tuple[str, str]] = {}
+    for line in out.splitlines():
+        parts = line.split(None, 6)
+        if len(parts) == 7 and parts[0].isdigit():
+            found[int(parts[0])] = (" ".join(parts[1:6]), parts[6].rsplit("/", 1)[-1])
+    return found
+
+
+def sessions(procs: list[Process], cfg: dict | None = None) -> list[Session]:
+    """Group processes into families by ANCESTRY, not by argv per process.
+
+    Matching each process on its own argv is what a first attempt does, and it
+    silently mislabels the majority: a browser's helper processes do not repeat
+    `--user-data-dir`, so 8 of 40 automation processes here classified as the
+    human's own Chrome. A root is matched on argv; everything beneath it is
+    claimed regardless of what its own argv says. A root that turns out to sit
+    under another root is absorbed, which is what folds a Playwright daemon and
+    the browser it launched into one session instead of two.
+    """
+    families = dict(DEFAULT_FAMILIES)
+    families.update((cfg or {}).get("process_families", {}))
+    tree = _ps_tree()
+    identity = _identity()
+    mine = {os.getpid(), os.getppid()}
+    by_pid = {p.pid: p for p in procs}
+
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _) in tree.items():
+        children.setdefault(ppid, []).append(pid)
+
+    roots: dict[int, tuple[str, str]] = {}
+    for pid, (_, args) in tree.items():
+        if pid in mine:
+            continue
+        for family, markers in families.items():
+            hit = next((h for h in (_marker_hit(args, m) for m in markers) if h), "")
+            if not hit:
+                continue
+            if family == "automation-browser" and not _root_is_automation(args, hit):
+                continue
+            roots[pid] = (family, hit)
+            break
+
+    def has_matched_ancestor(pid: int) -> bool:
+        cur = tree.get(pid, (0, ""))[0]
+        while cur > 1:
+            if cur in roots:
+                return True
+            cur = tree.get(cur, (0, ""))[0]
+        return False
+
+    found: list[Session] = []
+    for pid, (family, mark) in roots.items():
+        if has_matched_ancestor(pid):
+            continue
+        claimed, stack = [], [pid]
+        while stack:
+            cur = stack.pop()
+            claimed.append(cur)
+            stack.extend(children.get(cur, []))
+        known = [by_pid[p] for p in claimed if p in by_pid]
+        args = tree[pid][1]
+        found.append(Session(
+            family=family,
+            root_pid=pid,
+            mark=mark,
+            detail=_session_detail(args, mark),
+            binary=args.split(" ", 1)[0].rsplit("/", 1)[-1],
+            pids=sorted(claimed),
+            # Per pid, not the root's: a session spans several executables.
+            names={p: identity[p][1] for p in claimed if p in identity},
+            starts={p: identity[p][0] for p in claimed if p in identity},
+            age_seconds=max((p.age_seconds for p in known), default=0.0),
+            memory=sum(p.memory for p in known),
+        ))
+    return sorted(found, key=lambda s: s.age_seconds, reverse=True)
+
+
+def _root_is_automation(args: str, hit: str) -> bool:
+    """Keep the profile test that stops Electron apps reading as automation."""
+    if hit != "--enable" + "-automation":
+        return True
+    match = re.search(r"--user-data" + r"-dir[= ]([^\s]+)", args)
+    return bool(match) and _is_automation_profile(match.group(1))
+
+
+def _session_detail(args: str, mark: str) -> str:
+    """What a human would recognise this session by.
+
+    A profile path when there is one, otherwise the argv token that OWNS the
+    mark — `node …/gitnexus mcp` reads as `gitnexus mcp`, where the mark alone
+    would just say `mcp` across sixteen indistinguishable rows.
+    """
+    match = re.search(r"--user-data" + r"-dir[= ]([^\s]+)", args)
+    if match:
+        return match.group(1)
+    tokens = args.split()
+    if mark in tokens:
+        index = tokens.index(mark)
+        owner = tokens[index - 1].rsplit("/", 1)[-1] if index else ""
+        return f"{owner} {mark}".strip()
+    tail = args.split(mark, 1)[1].strip().split(" ", 1)[0] if mark in args else ""
+    return f"{mark} {tail}".strip()
+
+
+@dataclass
 class Alert:
     severity: str  # "crit" | "warn" | "info"
     text: str

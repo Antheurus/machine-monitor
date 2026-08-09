@@ -50,12 +50,37 @@ def _process_name(pid: int) -> str:
     return out.stdout.strip().rsplit("/", 1)[-1]
 
 
-def refuse_reason(pid: int, expected_name: str = "") -> str:
+def _ps_field(pid: int, field: str) -> str:
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(pid), "-o", f"{field}="],
+            capture_output=True, text=True, timeout=3, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return " ".join(out.stdout.split())
+
+
+def refuse_reason(pid: int, expected_name: str = "", expected_argv_mark: str = "",
+                  expected_start: str = "") -> str:
     """Why this pid must not be signalled, or '' when it may be.
 
-    Re-reads the process name rather than trusting the caller's copy: between
-    building a list and acting on it the pid may have died and been reused, and
-    the whole point of this check is to catch exactly that.
+    Re-reads the process rather than trusting the caller's copy: between building
+    a list and acting on it the pid may have died and been reused, and catching
+    that is the whole point.
+
+    `expected_name` alone cannot do it for a multi-process app, because every
+    process shares one executable — the user's own Chrome and a Playwright Chrome
+    both report `/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`,
+    so a recycled pid passes the name check and the human's browser is signalled.
+
+    Two stronger checks, and they answer different questions.
+    `expected_start` is the process's `lstart`: it identifies this exact process
+    INSTANCE, so it settles pid reuse outright and applies to every process,
+    including a browser helper whose argv is indistinguishable from the user's.
+    `expected_argv_mark` is a literal only the intended target carries (a
+    throwaway `--user-data-dir`, a daemon's session name) and catches a caller
+    that has confused two live processes rather than one recycled pid.
     """
     if pid in PROTECTED_PIDS:
         return "system pid"
@@ -68,11 +93,18 @@ def refuse_reason(pid: int, expected_name: str = "") -> str:
         return f"protected process ({live_name})"
     if expected_name and live_name != expected_name:
         return f"pid now belongs to {live_name}, not {expected_name}"
+    if expected_start:
+        live_start = _ps_field(pid, "lstart")
+        if live_start and live_start != expected_start:
+            return f"started {live_start}, not {expected_start} — pid was reused"
+    if expected_argv_mark and expected_argv_mark not in _ps_field(pid, "args"):
+        return f"argv no longer contains {expected_argv_mark!r} — pid was reused"
     return ""
 
 
 def terminate(pid: int, expected_name: str = "", grace: float = 3.0,
-              confirm: bool = False, dry_run: bool = False) -> KillResult:
+              confirm: bool = False, dry_run: bool = False,
+              expected_argv_mark: str = "", expected_start: str = "") -> KillResult:
     """SIGTERM, then SIGKILL only if the process is still alive after `grace`.
 
     A dev server given SIGTERM closes its listening socket and flushes; SIGKILL
@@ -83,7 +115,7 @@ def terminate(pid: int, expected_name: str = "", grace: float = 3.0,
     if not confirm:
         return KillResult(pid, name, "refused", "not confirmed")
 
-    reason = refuse_reason(pid, expected_name)
+    reason = refuse_reason(pid, expected_name, expected_argv_mark, expected_start)
     if reason:
         outcome = "gone" if reason == "no longer running" else "refused"
         return KillResult(pid, name, outcome, reason)
@@ -146,15 +178,22 @@ def _alive(pid: int) -> bool:
     return bool(state) and not state.startswith("Z")
 
 
-def terminate_all(targets: list[tuple[int, str]], confirm: bool = False,
-                  dry_run: bool = False) -> list[KillResult]:
+def terminate_all(targets: list[tuple[int, str]] | list[tuple[int, str, str]],
+                  confirm: bool = False, dry_run: bool = False) -> list[KillResult]:
     """Signal a batch, parents before children.
 
     Descending pid order approximates parent-first, and killing a browser's main
     process usually takes its helpers with it — so most children are already gone
     by the time their turn comes, and they report "gone" rather than erroring.
+
+    A target may carry a third element (the argv mark) and a fourth (the
+    `lstart` string), both re-checked by `refuse_reason`.
     """
     results = []
-    for pid, name in sorted(targets, key=lambda item: item[0]):
-        results.append(terminate(pid, name, confirm=confirm, dry_run=dry_run))
+    for target in sorted(targets, key=lambda item: item[0]):
+        pid, name = target[0], target[1]
+        mark = target[2] if len(target) > 2 else ""
+        start = target[3] if len(target) > 3 else ""
+        results.append(terminate(pid, name, confirm=confirm, dry_run=dry_run,
+                                 expected_argv_mark=mark, expected_start=start))
     return results

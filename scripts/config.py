@@ -71,6 +71,7 @@ def _parse(parser: configparser.ConfigParser) -> dict[str, Any]:
         "port_labels": {},
         "port_ranges": [],
         "power": {},
+        "process_families": {},
     }
 
     for key, value in parser.items("general") if parser.has_section("general") else []:
@@ -107,6 +108,12 @@ def _parse(parser: configparser.ConfigParser) -> dict[str, Any]:
         for port, label in parser.items("port_labels"):
             cfg["port_labels"][port.strip()] = label.strip()
 
+    if parser.has_section("process_families"):
+        for label, markers in parser.items("process_families"):
+            found = _split_list(markers)
+            if found:
+                cfg["process_families"][label.strip()] = found
+
     if parser.has_section("port_ranges"):
         for span, label in parser.items("port_ranges"):
             low, _, high = span.partition("-")
@@ -133,7 +140,7 @@ def load() -> dict[str, Any]:
         # Without the shipped file there is nothing sensible to fall back to.
         return {
             "sections": {}, "thresholds": {}, "port_labels": {}, "port_ranges": [],
-            "power": {}, "project_roots": [], "hide_ports": [],
+            "power": {}, "project_roots": [], "hide_ports": [], "process_families": {},
             "refresh_seconds": 3, "cpu_sample_seconds": 0.5, "top_processes": 12,
             "_config_error": f"cannot read {SHIPPED_PATH}: {exc}",
         }

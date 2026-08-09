@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.1.0 — Clean up leftover browsers and servers one session at a time
+
+- **Kill exactly the sessions you mean to.** `--sessions` lists every group of related processes —
+  a Playwright browser and all its helpers count as one row, not thirteen — and
+  `--kill-session <root pid>` removes one of them. Previously the only option was `--kill-orphans`,
+  which took all of them or none, so a leftover session could not be cleared while a browser you
+  were still using stayed open.
+- **Your own apps are no longer mistaken for automation.** Grouping now follows which process
+  started which, instead of guessing from each process's own command line. That guess was putting 8
+  of 40 automation processes in the same bucket as your real Chrome.
+- **A safety hole in the kill path is closed.** The check that stops the tool signalling the wrong
+  process compared program names, and every window of one app shares a name — so your own Chrome and
+  a test Chrome looked identical to it. It now also checks the process's start time, which is unique
+  to each one.
+- **Memory figures in the one-shot views were far too low.** `--orphans` and the other single-run
+  modes were reporting a smaller number than the real one — 1.2 GB for what was actually 2.70 GB of
+  leftover browsers. Fixed.
+- **Add your own process groups** in `config.ini` under `[process_families]`, one line each.
+- No action required after updating.
+
 ## v2.0.1 — The mystery 4 GB process now tells you which app it belongs to
 
 - **The biggest memory hog is no longer anonymous.** A process called
