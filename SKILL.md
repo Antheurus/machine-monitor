@@ -1,85 +1,99 @@
 ---
 name: machine-monitor
 description: >
-  Live machine monitor — shows all running servers (listening ports), top CPU processes, top RAM processes, thermal load (pressure + power draw, no misleading °C), and an automatic WindowServer diagnosis when CPU is high, in an htop-style segmented terminal view with color-coded bars and kill instructions. Invoke this skill whenever the user asks to "see what's running", "check running servers", "monitor processes", "what's eating memory/CPU", "show running ports", "htop view", "kill a process", "check temperature", "how hot is my mac", "why is my mac hot", "why is WindowServer high", or wants a system overview of their machine. Also trigger proactively when the user asks to stop or restart a specific service and needs to identify its PID first.
+  This skill should be used when the user asks to "see what's running", "check running servers",
+  "monitor processes", "what's eating memory/CPU", "show running ports", "htop view", "kill a
+  process", "check temperature", "how hot is my mac", "why is my mac hot", "why is my mac slow",
+  "why is WindowServer high", "what can I delete", "free up disk space", "find stale dev servers",
+  or wants a system overview of their macOS machine. Also trigger proactively when the user asks to
+  stop or restart a service and needs to identify its PID first. Reports real die temperature in °C,
+  memory including compressed pages and swap, live per-process CPU, every listening port mapped to
+  the project it was started from, Docker, disk, battery, reclaimable space, and orphaned automation
+  browsers — and can terminate stale processes with confirmation.
 ---
 
 ## What this skill does
 
-Runs `scripts/monitor.sh` — a self-contained bash script that renders a color-coded terminal dashboard:
+Runs `scripts/main.py` — a zero-dependency Python tool (system `python3`, nothing to install).
 
-1. **THERMAL LOAD** — Thermal pressure level, CPU/GPU power draw (mW). **No °C readings** — battery and CLI die temps mislead on Apple Silicon; use a thermal camera for chassis heat.
-2. **SERVERS RUNNING** — every process listening on a port (PID, port, labeled service)
-3. **TOP CPU USAGE** — top 15 processes by CPU%, color bars (red ≥15%, orange ≥5%, green <5%)
-4. **WINDOWSERVER DIAGNOSIS** — **auto-appears when WS CPU > 15%**. Live validation of 5 factors (refresh rate, video decode, screen recording, transparency, displays) with verdicts — not guesses
-5. **TOP RAM USAGE** — top 15 processes by %MEM, same color coding
-
-Persistent mode (`-d`) auto-refreshes every 3 seconds. Press `r` to force refresh, `q` to quit.
+Dashboard sections, in render order: **VITALS** (CPU with per-core P/E split, memory, swap, disk,
+network and disk throughput) · **THERMAL** (die temperatures, pressure, power draw) · **NEEDS
+ATTENTION** (what to act on) · **SERVERS RUNNING** (every TCP and UDP listener with its project) ·
+**DOCKER** · **TOP CPU** · **WINDOWSERVER DIAGNOSIS** (auto, above 15%) · **TOP RAM**.
 
 ## How to run
 
-**Single snapshot:**
 ```bash
-bash ~/.claude/skills/machine-monitor/scripts/monitor.sh
+machine-monitor                      # single snapshot (alias to scripts/main.py)
+machine-monitor -d                   # live: / filter, c·m·a sort, k kill, q quit
+machine-monitor --json               # machine-readable, every number already parsed
 ```
 
-**Persistent live mode (auto-refresh every 3s):**
-```bash
-bash ~/.claude/skills/machine-monitor/scripts/monitor.sh -d
-```
+**Prefer `--json` when answering a question rather than showing the user a screen.**
 
-## Thermal load section — Apple Silicon reality
+| Mode | Purpose |
+|---|---|
+| `--only <section>` | Render one section. Repeatable. Cheapest way to answer a narrow question. |
+| `--space` | Reclaimable disk space: caches, `node_modules`, build output, Docker. Slow (~30s), walks project trees. |
+| `--orphans` | Leftover automation browser sessions, grouped by profile. |
+| `--history [hours]` | Recorded trends with sparklines. Every run records one sample. |
+| `--save <name>` / `--diff <name>` / `--snapshots` | Compare the machine against a saved state. |
+| `--reclaim` | Terminate dev servers idle past the stale threshold. Asks for typed confirmation. |
+| `--kill-orphans` | Terminate leftover automation browsers. Asks for typed confirmation. |
+| `--check` | Evaluate alert thresholds once and send a macOS notification. |
+| `--watch-install [sec]` / `--watch-uninstall` / `--watch-status` | Background alert agent via launchd. |
 
-Apple Silicon Macs (M1/M2/M3+) **do not expose reliable CPU/chassis °C through any public macOS CLI**. Battery temp (~30°C) and `osx-cpu-temp` (often reads 0°C on M-series) **do not reflect how hot the laptop feels** — chassis can be 50–60°C while battery reads 31°C. This skill intentionally omits all °C readings.
+Also: `-i/--interval`, `-n/--top`, `--no-color`, `--config`, `--dry-run`, `--yes`.
 
-| Metric | Source | Needs |
-|--------|--------|-------|
-| Thermal pressure (Nominal/Moderate/Heavy/Critical) | `powermetrics --samplers thermal` | passwordless sudo (see below) |
-| CPU/GPU power draw (mW) | `powermetrics --samplers cpu_power,gpu_power` | passwordless sudo |
+## Rules when acting on this tool's output
 
-For actual surface heat, use a **thermal camera** — not CLI sensors.
+**Every number here has a specific meaning and several have a naive reading that is wrong.**
+Before quoting a figure to the user or drawing a conclusion from it, consult
+`references/metrics.md` — it covers what each metric actually measures, which ones supersede the
+obvious source, and the readings that are structurally unavailable on Apple Silicon.
 
-### One-time setup for passwordless `powermetrics`
+Three that matter most often:
 
-```bash
-echo "$(whoami) ALL=(ALL) NOPASSWD: /usr/bin/powermetrics" | sudo tee /etc/sudoers.d/powermetrics
-```
+- **Do not quote `RSS` as a process's memory.** The `MEM` column is physical footprint; a process
+  that macOS has compressed shows a tiny RSS and a large footprint. Measured here: 3 MB RSS against
+  2.2 GB footprint.
+- **Do not read `CPU%` as a lifetime figure.** It is a live delta over the sample window.
+- **Do not conclude "plenty of RAM free" from the memory row alone.** Read `SWAP` beside it.
 
-Script auto-detects this via `sudo -n -l /usr/bin/powermetrics` and uses `sudo powermetrics` transparently when set up.
+## Killing things
 
-**AI agents:** never quote battery °C or osx-cpu-temp as "how hot the Mac is". Report thermal pressure + power draw + top CPU processes instead.
+Destructive paths live in `scripts/actions.py` and all obey the same contract: a target must come
+from a candidate list, it is re-checked immediately before the signal, and nothing is signalled
+without confirmation. SIGTERM first, SIGKILL only after a grace period.
 
-## WindowServer diagnosis — automatic, real validation
+When the user asks to kill something: run a snapshot, identify the PID, **confirm which PID with the
+user**, then act. For a port, `lsof -nP -iTCP:<PORT> -sTCP:LISTEN -t` — `-sTCP:LISTEN` is not
+optional, since a bare `lsof -ti:<PORT>` also matches client connections and can kill the user's
+browser instead of the server.
 
-When WindowServer CPU exceeds 15%, the script automatically runs **live checks** (not heuristics) for 5 factors:
+## Configuration
 
-| Factor | How it's checked | What it means |
-|--------|------------------|---------------|
-| Refresh rate | `system_profiler SPDisplaysDataType -json` parsed for `Hz` | If 120Hz → ProMotion compositing is the cause |
-| Video decode | `pgrep VTDecoderXPCService` + summed CPU | If active → browser/app decoding video |
-| Screen recording | known recorder apps in `ps aux` + `lsof` for `SCStream`/`screencaptured` | Confirmed if found |
-| Transparency | `defaults read com.apple.universalaccess reduceTransparency` | OFF = blur/vibrancy compositing |
-| Display count | `system_profiler` grep `Resolution:` | More displays = more pixels |
+Shipped defaults live in `scripts/config.ini`, in the repository. Personal overrides go in
+`~/.config/machine-monitor/config.ini`, which is read second and wins key by key — anything omitted
+there keeps the shipped value. Covers port labels and ranges, every colour threshold, refresh
+interval, which sections render, project roots and hidden ports.
 
-Output marks each as **← CAUSE** (definite), **← FACTOR** (contributing), or **✓** (not the cause). Don't speculate causes when this section ran — it has live data.
+## Setup and degraded operation
 
-## Kill shortcuts (shown in the footer)
+Temperature needs no setup. Only thermal *pressure* and *power draw* require passwordless
+`powermetrics`; without it those two fields are omitted and the dashboard prints the one-line command
+to enable them. Missing Docker, sensors, or history each degrade to a hidden section rather than an
+error — see `references/troubleshooting.md`.
 
-```bash
-kill -9 <PID>                        # kill by PID (shown in yellow in the dashboard)
-lsof -ti:<PORT> | xargs kill -9      # kill whatever is on a specific port
-```
+## Verifying a change to this skill
 
-## When the user asks to kill a process
+`python3 tests/eval_scenarios.py` renders the dashboard against ten synthetic machines — hot, memory
+full, swap thrashing, disk full, CPU pinned, no sensors, no memory source, empty, and absurd values —
+and asserts on colours, alerts, empty states and line widths. Run it after any change to rendering,
+thresholds, or collectors. `--show <scenario>` prints one for eyeballing.
 
-1. Run a snapshot (`monitor.sh`) to get current PIDs
-2. Identify the PID from the relevant section
-3. Confirm with the user which PID to kill before running `kill -9`
+## Additional resources
 
-## Script location & dependencies
-
-`scripts/monitor.sh` — bundled alongside this SKILL.md.
-
-Required (built-in macOS): `ps`, `lsof`, `vm_stat`, `sysctl`, `system_profiler`, `defaults`, `awk`, `python3`.
-
-Optional (richer data): `powermetrics` via passwordless sudo (thermal pressure + power draw).
+- **`references/metrics.md`** — what every metric actually measures, and the wrong readings to avoid.
+- **`references/troubleshooting.md`** — degraded sources, permissions, and what each blank section means.
+- **`tests/eval_scenarios.py`** — the failure-condition eval suite.
