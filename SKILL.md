@@ -5,6 +5,7 @@ description: >
   "monitor processes", "what's eating memory/CPU", "show running ports", "htop view", "kill a
   process", "check temperature", "how hot is my mac", "why is my mac hot", "why is my mac slow",
   "why is WindowServer high", "what can I delete", "free up disk space", "find stale dev servers",
+  "why is System Data so big", "kenapa System Data gede banget", "apaan 180GB System Data",
   or wants a system overview of their macOS machine. Also trigger proactively when the user asks to
   stop or restart a service and needs to identify its PID first. Reports real die temperature in °C,
   memory including compressed pages and swap, live per-process CPU, every listening port mapped to
@@ -37,6 +38,8 @@ machine-monitor --json               # machine-readable, every number already pa
 |---|---|
 | `--only <section>` | Render one section. Repeatable. Cheapest way to answer a narrow question. |
 | `--space` | Reclaimable disk space: caches, `node_modules`, build output, Docker. Slow (~30s), walks project trees. |
+| `--clones` | Leftover code-sign clone litter — the usual cause of an absurd "System Data" figure. |
+| `--clean-clones` | Remove the clones no process holds open, and report the *measured* reclaim. |
 | `--orphans` | Leftover automation browser sessions, grouped by profile. |
 | `--sessions [family]` | Every process-family session: root pid, process count, footprint. Optionally one family. |
 | `--kill-session <root-pid>` | Terminate one session by its root pid. Repeatable. Asks for typed confirmation. |
@@ -63,6 +66,35 @@ Three that matter most often:
   2.2 GB footprint.
 - **Do not read `CPU%` as a lifetime figure.** It is a live delta over the sample window.
 - **Do not conclude "plenty of RAM free" from the memory row alone.** Read `SWAP` beside it.
+- **Do not quote a `du`-derived size as reclaimable disk.** `du`, `--space` and macOS's own Storage
+  pane all bill an APFS clone at full size. See below.
+
+## Apparent size is not disk space
+
+A Mac reporting **System Data 180.52 GB** with 79 GB free is almost always carrying code-sign clone
+litter, and every cheap way to measure it overstates the win by two orders of magnitude.
+
+macOS clones an app bundle to verify its signature, files it under
+`/private/var/folders/<x>/<y>/X/<bundle-id>.code_sign_clone/`, and often fails to reap it. Measured
+here 2026-08-10: **258 copies of `Google Chrome.app`, 652 GB apparent, accruing ~32/day** — on a
+volume with 375 GB used, which is the tell. `du -sh -x /private/var/folders` answered **609 G**.
+
+**Deleting all 258 freed 2.4 GB.** The blocks were shared with the original the whole time.
+
+So when answering a storage question:
+
+- **Quote `df`/`statvfs`, never `du`.** Treat any `du` total — including the one `--space` prints —
+  as an upper bound. A directory reporting more bytes than the volume physically holds is the
+  diagnosis, not a glitch to route around.
+- **Take a free-space reading before *and* after any cleanup.** `--clean-clones` does this and prints
+  both figures side by side. Never report the size of what was deleted as what the user got back.
+- **Say plainly that the Storage pane's number will drop while free space barely moves.** That is the
+  honest outcome and it is still worth doing — the panel stops lying.
+
+`--clean-clones` skips any clone a process currently holds open (`lsof +D`), so it runs safely
+without quitting the app. When `lsof` cannot answer, the bucket is refused rather than guessed at —
+`IN USE ?` in the report means exactly that. Sparse files invert the same trap: `Docker.raw` measured
+494 GB apparent against 13.4 GB of real blocks.
 
 ## Process families and sessions
 
@@ -127,8 +159,13 @@ full, swap thrashing, disk full, CPU pinned, no sensors, no memory source, empty
 and asserts on colours, alerts, empty states and line widths. Run it after any change to rendering,
 thresholds, or collectors. `--show <scenario>` prints one for eyeballing.
 
+`python3 tests/test_clones.py` covers clone detection and removal against a synthetic tree, proving
+each guard in **both** directions — a check that only ever refuses is indistinguishable from a broken
+one. Run it after any change to `clones.py` or to the directory half of `actions.py`.
+
 ## Additional resources
 
 - **`references/metrics.md`** — what every metric actually measures, and the wrong readings to avoid.
 - **`references/troubleshooting.md`** — degraded sources, permissions, and what each blank section means.
 - **`tests/eval_scenarios.py`** — the failure-condition eval suite.
+- **`tests/test_clones.py`** — clone detection, removal guards, and the apparent-vs-real measurement.

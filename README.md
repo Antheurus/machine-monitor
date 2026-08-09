@@ -79,11 +79,56 @@ python3 ~/.claude/skills/machine-monitor/scripts/main.py --json
 `-i/--interval` sets the refresh, `-n/--top` the rows per table, `--no-color` disables ANSI,
 `--config` prints the config path.
 
+## Cleaning up
+
+| Mode | What it does |
+|---|---|
+| `--space` | Caches, `node_modules`, build output and Docker, sized. Walks project trees, so ~30s. |
+| `--clones` | Leftover code-sign clone litter — see below. |
+| `--clean-clones` | Removes the clones no process holds open, and reports the **measured** reclaim. |
+| `--sessions [family]` | Every process family as one row: root pid, process count, footprint. |
+| `--kill-session <pid>` | Terminate one session. `--orphans` / `--kill-orphans` cover automation browsers. |
+| `--reclaim` | Terminate dev servers idle past the stale threshold. |
+
+Everything destructive asks for a typed `yes`, accepts `--dry-run`, and re-checks each target
+immediately before acting.
+
+### Why "System Data" claims 180 GB
+
+macOS clones an app bundle to verify its code signature, files the copy under
+`/private/var/folders/<x>/<y>/X/<bundle-id>.code_sign_clone/`, and frequently fails to reap it.
+Measured on the development machine: **258 copies of `Google Chrome.app`, 652 GB apparent**, accruing
+about 32 a day — on a volume with 375 GB used. `du -sh -x /private/var/folders` answered **609 G**,
+which is more than the disk physically holds, and that impossibility is the diagnosis.
+
+**Deleting all 258 freed 2.4 GB.** They are APFS clones sharing blocks with the original, and `du`,
+the Storage pane and `--space` all bill them at full size.
+
+So `--clones` labels its size column as an upper bound, and `--clean-clones` never derives the
+reclaim from it — free space is read from `statvfs` immediately either side of the removal and both
+numbers are printed side by side. Expect the Storage pane to drop a lot while free space barely
+moves; that is the honest outcome, and the panel has stopped lying. Clones currently held open are
+skipped (`lsof +D`), so the app does not need to be quit; when `lsof` cannot answer, the bucket is
+refused rather than guessed at. Sparse files invert the same trap — `Docker.raw` measured 494 GB
+apparent against 13.4 GB of real blocks.
+
+## Tests
+
+```bash
+python3 tests/eval_scenarios.py   # renders 11 synthetic machines, asserts colours/alerts/widths
+python3 tests/test_clones.py      # clone detection and removal guards, proved in both directions
+```
+
 ## Configuration
 
-`~/.config/machine-monitor/config.json`, written on first run. Port labels, port ranges, every color
-threshold, refresh interval, which sections render, project roots, hidden ports. Unknown or missing
-keys fall back to the defaults, so the file never has to be complete or current.
+Two files, both INI. Defaults ship as `scripts/config.ini` in the repository — a real file, so the
+shipped values are readable and diffable rather than buried in code. Personal overrides go in
+`~/.config/machine-monitor/config.ini`, written from a template on first run, read second and winning
+key by key. Anything left out keeps its shipped value, so the override file never has to be complete
+or current.
+
+Covers port labels, port ranges, every colour threshold, refresh interval, which sections render,
+project roots, hidden ports, and the process families used for session grouping.
 
 ## Thermal pressure and power draw need one-time setup
 

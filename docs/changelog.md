@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.2.0 — Find out why "System Data" says 180 GB, and get an honest answer
+
+- **New `--clones`: the usual reason your Mac claims a huge "System Data".** Every time an app's
+  signature is checked, macOS copies the whole app into a temp folder and is supposed to throw the
+  copy away. Often it doesn't. On this Mac there were **258 copies of Google Chrome** stacked up over
+  eight days, and Settings was counting all of them.
+- **`--clean-clones` clears them, and tells you the truth about what you got back.** Those copies
+  share storage with the real app, so the disk only returns a small fraction of the headline number —
+  here 652 GB of copies gave back 2.4 GB. The tool measures free space before and after and reports
+  the real figure, instead of adding up what it deleted and calling that a win. Expect the Storage
+  pane to drop a lot while free space barely moves. That is the correct outcome: the panel stops
+  lying to you.
+- **You don't have to quit the app first.** Any copy currently in use is left alone. If that can't be
+  determined for certain, the tool refuses that app rather than guessing.
+- **`--space` no longer overpromises.** It used to state the exact disk percentage you'd reach after
+  clearing everything it listed. It now says "no better than", because the same shared-storage effect
+  applies there too.
+
+No action required after updating.
+
 ## v2.1.0 — Clean up leftover browsers and servers one session at a time
 
 - **Kill exactly the sessions you mean to.** `--sessions` lists every group of related processes —

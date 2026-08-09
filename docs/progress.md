@@ -1,5 +1,56 @@
 # machine-monitor Progress
 
+## Session — 2026-08-10 (cont) — v2.2.0 (code-sign clone litter, and apparent size stops being quoted as disk)
+
+Came out of a live diagnosis, not a feature request: macOS Settings reported **System Data 180.52 GB**
+on a Mac with 79 GB free, and `du -sh -x /private/var/folders` answered **609 G on a volume holding
+375 GB**. That impossibility was the whole diagnosis — the cause was 258 leftover
+`com.google.Chrome.code_sign_clone` copies of `Google Chrome.app` under
+`/private/var/folders/jz/…/X/`, 2.21 GB each, 652 GB apparent, accruing ~32/day since 2026-08-02.
+Deleting all 258 freed **2.4 GB**: they are APFS clones sharing blocks with the original, and `du`,
+the Storage pane and this tool's own `--space` all bill them at full size. The 260x gap between the
+apparent and real figures is the thing the release encodes.
+
+New `scripts/clones.py` finds the buckets (`/private/var/folders/*/*/X/*.code_sign_clone`), sizes them
+the way `du` does so the litter is *findable*, and reports that number explicitly as an upper bound.
+The reclaim figure is never derived from it — `purge()` reads `statvfs` immediately either side of the
+removal and reports what the volume actually gave back. `lsof -n -Fn +D` names the clones a process
+currently holds open, so a cleanup runs without quitting the app (2 of 258 were live here); when
+`lsof` cannot answer, `in_use` is `None` and the bucket is **refused rather than guessed at** —
+distinct from an empty set, and conflating the two would delete a live clone.
+
+Deletion went into `actions.py` rather than beside the detector, keeping the promise in its module
+docstring that the destructive surface is one small readable file. `remove_dirs()` takes an explicit
+list — there is nowhere to pass a `*` or `.` pathspec — and `refuse_removal()` re-resolves both sides
+with `realpath` before comparing, since a symlinked parent otherwise lets a target that reads as
+inside the base resolve anywhere; the separator is part of the prefix test so `/tmp/safe-evil` cannot
+pass for a base of `/tmp/safe`. A `PROTECTED_BASES` set rejects a base as shallow as
+`/private/var/folders`. Two things were also fixed while here: `draw_space` promised a specific
+post-cleanup disk percentage from `du` sums and now says "no better than", and
+`confirm_destructive()` hardcoded "process(es)" in its own prompt while taking a `what` verb, so it
+gained a `noun` parameter instead of being forked.
+
+Verified three ways. `tests/test_clones.py` (new) is 27 checks, with every guard proved in both
+directions — the allow case matters as much as the refusal, since a check that only ever refuses is
+indistinguishable from a broken one. It shipped flaky on the first pass and the flake was the test's
+fault, not the code's: it asserted that `real_bytes` and `apparent_bytes` merely *differ*, and
+deleting a few kilobytes of ordinary files can move free space by exactly the apparent amount, so it
+failed once in about eight runs for a reason unrelated to what it was checking. Replaced with a
+deterministic pair — the measured delta must equal `free_after - free_before`, and a hand-built
+`PurgeReport` with a 1 TB apparent size against a 50-byte delta proves the apparent figure never
+leaks into the real one. 20 consecutive runs, 27/27 each. `tests/eval_scenarios.py` stayed 11/11 plus unit
+checks after the `draw_space` and `confirm_destructive` edits. And the full CLI was driven at the real
+path: a synthetic 6-clone bucket built under the live `/private/var/folders/jz/…/X/`, `--clones`
+found it, `--clean-clones --dry-run` planned 6 and deleted 0, `--clean-clones --yes` removed 6 and
+reported `5.7M apparent → 5.8M actually freed`. That last pair is the positive control — for genuine
+files the two figures agree, which proves the `statvfs` measurement is live rather than cosmetic, and
+for real clones they diverge by 260x.
+
+Follow-up not done: nothing schedules this, so the litter regrows at ~32/day. A `--watch`-style
+periodic sweep is the obvious next step and was deliberately left out of this change.
+
+---
+
 ## Session — 2026-08-10 — v2.1.0 (process-family sessions, and a kill guard that actually guards)
 
 Started as a request to kill leftover test/Playwright Chromes without touching the user's own

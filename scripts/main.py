@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import actions  # noqa: E402
+import clones as clones_mod  # noqa: E402
 import collect  # noqa: E402
 import config as config_mod  # noqa: E402
 import history as history_mod  # noqa: E402
@@ -611,10 +612,102 @@ def draw_space(c: Canvas, items: list, cfg: dict) -> None:
     if disk.total:
         after = disk.used_pct - 100.0 * total / disk.total
         c.raw("")
+        # A floor, not a forecast: these sizes are du-style, and du bills an APFS
+        # clone and a shared Docker layer at full size. See --clones.
         c.wrapped(
-            f"Clearing all of it takes the disk from {disk.used_pct:.0f}% to about {after:.0f}%.",
+            f"Clearing all of it takes the disk from {disk.used_pct:.0f}% to "
+            f"no better than about {after:.0f}%.",
             t.ok,
         )
+
+
+def draw_clones(c: Canvas, groups: list) -> None:
+    t = c.t
+    total = sum(g.apparent_bytes for g in groups)
+    count = sum(g.count for g in groups)
+    c.section(
+        "CODE-SIGN CLONE LITTER",
+        f"{count} clone(s) across {len(groups)} app(s), {human_bytes(total)} apparent",
+    )
+    if not groups:
+        c.raw(f"  {t.ok}✓{t.reset} {t.dim}nothing left behind{t.reset}")
+        return
+
+    now = time.time()
+    specs = [
+        Column("count", "CLONES", 6, "right", priority=9),
+        Column("apparent", "APPARENT", 9, "right", priority=8),
+        Column("busy", "IN USE", 6, "right", priority=6),
+        Column("oldest", "OLDEST", 8, "right", priority=4),
+        Column("app", "APP", 34, "left", priority=9),
+    ]
+    c.table(specs, [{
+        "count": (str(g.count), t.level(g.count, 5, 25)),
+        "apparent": (human_bytes(g.apparent_bytes), t.dim),
+        "busy": ("?" if g.in_use is None else str(len(g.in_use)), t.dim),
+        "oldest": (human_duration(now - g.oldest), t.dim),
+        "app": (g.label, t.value),
+    } for g in groups])
+
+    c.raw("")
+    c.wrapped(
+        "APPARENT is what du and the Storage pane report, and it is an upper bound, "
+        "not a forecast. These are APFS clones sharing blocks with the original app, "
+        "so the disk gets back a fraction of it — 258 Chrome clones billed at 652 GB "
+        "returned 2.4 GB. The real figure is measured from statvfs after removal.",
+        t.warn,
+    )
+    if any(g.in_use is None for g in groups):
+        c.wrapped(
+            "IN USE '?' means lsof could not say which clones are open, so those "
+            "buckets will be refused rather than guessed at.", t.warn,
+        )
+    c.wrapped("Clear with:  machine-monitor --clean-clones", t.accent)
+
+
+def report_removals(reports: list) -> int:
+    """Print what each bucket actually gave back, apparent beside real."""
+    total_real = total_apparent = removed = 0
+    planned = failed = 0
+
+    for report in reports:
+        group = report.group
+        if group.in_use is None:
+            print(f"  {group.label}: refused — lsof could not identify the clones in use")
+            failed += 1
+            continue
+        if not report.results:
+            print(f"  {group.label}: nothing removable ({group.count} clone(s), all in use)")
+            continue
+
+        planned += sum(1 for r in report.results if r.outcome == "planned")
+        for result in report.results:
+            if result.outcome in ("refused", "error"):
+                failed += 1
+                print(f"  {group.label}: {result.outcome} {result.path} — {result.detail}")
+
+        removed += report.removed
+        total_apparent += report.apparent_bytes
+        total_real += report.real_bytes
+        if report.removed:
+            print(
+                f"  {group.label}: removed {report.removed} clone(s), "
+                f"{human_bytes(report.apparent_bytes)} apparent → "
+                f"{human_bytes(report.real_bytes)} actually freed"
+            )
+
+    if planned:
+        print(f"\ndry run: {planned} clone(s) would be removed, nothing was deleted")
+        return 0
+    if removed:
+        print(
+            f"\nremoved {removed} clone(s). "
+            f"{human_bytes(total_apparent)} apparent, "
+            f"{human_bytes(total_real)} real — free space measured either side, not estimated."
+        )
+    elif not failed:
+        print("\nnothing to remove")
+    return 1 if failed and not removed else 0
 
 
 def draw_orphans(c: Canvas, orphans: list) -> None:
@@ -794,7 +887,8 @@ def draw_reclaim(c: Canvas, stale: list, hours: float) -> None:
     } for item in sorted(stale, key=lambda i: -i.age_seconds)])
 
 
-def confirm_destructive(count: int, what: str, assume_yes: bool) -> bool:
+def confirm_destructive(count: int, what: str, assume_yes: bool,
+                        noun: str = "process(es)") -> bool:
     """Require the word 'yes', typed, before anything is signalled.
 
     A y/n prompt is too easy to answer reflexively for an action with no undo,
@@ -804,10 +898,10 @@ def confirm_destructive(count: int, what: str, assume_yes: bool) -> bool:
     if assume_yes:
         return True
     if not sys.stdin.isatty():
-        print(f"\nrefusing to {what} {count} process(es) without a terminal — pass --yes to proceed")
+        print(f"\nrefusing to {what} {count} {noun} without a terminal — pass --yes to proceed")
         return False
     try:
-        answer = input(f"\nterminate {count} process(es)? type 'yes' to confirm: ")
+        answer = input(f"\n{what} {count} {noun}? type 'yes' to confirm: ")
     except (EOFError, KeyboardInterrupt):
         print()
         return False
@@ -1101,6 +1195,10 @@ def main() -> int:
                         help=f"render only these sections ({', '.join(SECTION_ORDER)}); repeatable")
     parser.add_argument("--space", action="store_true",
                         help="report reclaimable disk space and exit (slow: walks project trees)")
+    parser.add_argument("--clones", action="store_true",
+                        help="report leftover code-sign clone litter and exit")
+    parser.add_argument("--clean-clones", action="store_true",
+                        help="remove clone litter no process holds open, and measure the real reclaim")
     parser.add_argument("--orphans", action="store_true",
                         help="list leftover automation browser sessions and exit")
     parser.add_argument("--sessions", nargs="?", const="", metavar="FAMILY",
@@ -1172,6 +1270,26 @@ def main() -> int:
         draw_space(canvas, collect.reclaimable(cfg), cfg)
         print(canvas.render())
         return 0
+
+    if args.clones or args.clean_clones:
+        min_count = int(cfg["thresholds"].get("clone_min_count", 2))
+        groups = clones_mod.find_clone_groups(min_count=min_count)
+        canvas = Canvas(theme_early, render.term_width())
+        draw_clones(canvas, groups)
+        print(canvas.render())
+        if not args.clean_clones or not groups:
+            return 0
+
+        removable = sum(len(g.removable) for g in groups)
+        if not removable:
+            print("\nevery clone is currently open — nothing to remove")
+            return 0
+        if not confirm_destructive(removable, "remove", args.yes, noun="clone(s)"):
+            return 1
+        return report_removals([
+            clones_mod.purge(g, actions.remove_dirs, confirm=True, dry_run=args.dry_run)
+            for g in groups
+        ])
 
     monitor = Monitor(cfg)
     cfg["_ram_bytes"] = monitor.machine.ram_bytes

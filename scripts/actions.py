@@ -3,13 +3,17 @@
 Kept in its own module so the destructive surface is one small file that can be
 read in full before being trusted. Every path through it obeys the same three
 rules: a target must come from a candidate list the caller built, it is checked
-against a refusal list immediately before the signal, and nothing is signalled
-without the caller passing confirm=True.
+against a refusal list immediately before the act, and nothing is signalled or
+deleted without the caller passing confirm=True.
+
+Two kinds of target live here — processes, which are signalled, and directories,
+which are removed. They share the contract and nothing else.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import signal
 import subprocess
 import time
@@ -196,4 +200,98 @@ def terminate_all(targets: list[tuple[int, str]] | list[tuple[int, str, str]],
         start = target[3] if len(target) > 3 else ""
         results.append(terminate(pid, name, confirm=confirm, dry_run=dry_run,
                                  expected_argv_mark=mark, expected_start=start))
+    return results
+
+
+# ── directories ──────────────────────────────────────────────────────────────
+
+# A base this shallow means the caller computed a path wrong, and the damage
+# from acting on it is unbounded. Refusing costs a re-run; not refusing does not.
+PROTECTED_BASES = frozenset({
+    "/", "/System", "/Users", "/Applications", "/Library", "/private",
+    "/private/var", "/private/var/folders", "/private/tmp", "/tmp", "/usr",
+    "/bin", "/sbin", "/etc", "/opt", "/home", "/Volumes",
+})
+
+
+@dataclass
+class RemoveResult:
+    path: str
+    outcome: str  # "removed" | "planned" | "gone" | "refused" | "error"
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome in ("removed", "planned", "gone")
+
+
+def refuse_removal(path: str, base: str, name_must_contain: str = "") -> str:
+    """Why this directory must not be removed, or '' when it may be.
+
+    Re-resolves the path rather than trusting the caller's string, for the same
+    reason `refuse_reason` re-reads a pid: between building a list and acting on
+    it the filesystem may have changed underneath.
+
+    The containment check is the load-bearing one, and it is written against
+    `realpath` on both sides because a symlinked parent otherwise lets a target
+    that reads as inside `base` resolve anywhere at all. Direct string prefixing
+    on the unresolved paths would pass `/tmp/safe-evil` for a base of
+    `/tmp/safe`, so the separator is part of the comparison.
+    """
+    if not os.path.isabs(path) or not os.path.isabs(base):
+        return "not an absolute path"
+
+    real_base = os.path.realpath(base).rstrip(os.sep) or os.sep
+    if real_base in PROTECTED_BASES:
+        return f"base {real_base} is too broad to sweep"
+    if real_base == os.path.realpath(os.path.expanduser("~")):
+        return "base is the home directory"
+
+    if os.path.islink(path):
+        return "is a symlink"
+    if not os.path.lexists(path):
+        return "no longer present"
+
+    real = os.path.realpath(path)
+    if not real.startswith(real_base + os.sep):
+        return f"resolves outside {real_base}"
+    if name_must_contain and name_must_contain not in os.path.basename(real):
+        return f"name does not contain {name_must_contain!r}"
+    if not os.path.isdir(real):
+        return "not a directory"
+    return ""
+
+
+def remove_dirs(paths: list[str], base: str, name_must_contain: str = "",
+                confirm: bool = False, dry_run: bool = False) -> list[RemoveResult]:
+    """Delete directories that all sit directly under one verified `base`.
+
+    Every target is enumerated by the caller and re-checked here. A `*` or `.`
+    pathspec never reaches this function, because there is nowhere to put one —
+    the signature takes a list, and a wildcard that expanded wider than intended
+    is the classic way a sweep destroys the files it was written to protect.
+    """
+    results: list[RemoveResult] = []
+    for path in paths:
+        if not confirm:
+            results.append(RemoveResult(path, "refused", "not confirmed"))
+            continue
+
+        reason = refuse_removal(path, base, name_must_contain)
+        if reason == "no longer present":
+            results.append(RemoveResult(path, "gone", reason))
+            continue
+        if reason:
+            results.append(RemoveResult(path, "refused", reason))
+            continue
+        if dry_run:
+            results.append(RemoveResult(path, "planned", "dry run — would be removed"))
+            continue
+
+        try:
+            shutil.rmtree(path)
+        except OSError as exc:
+            results.append(RemoveResult(path, "error", str(exc)))
+            continue
+        results.append(RemoveResult(path, "removed"))
     return results
