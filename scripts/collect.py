@@ -255,6 +255,21 @@ class Process:
     ppid: int = 0
     children: int = 0
     owner: str = ""
+    cpu_seconds: float = 0.0
+
+    @property
+    def lifetime_cpu_pct(self) -> float:
+        """Average CPU used across the process's whole life, as a percent of one core.
+
+        This is what `ps %CPU` reports, and `references/metrics.md` is right that
+        it is the wrong answer to "what is busy now" — a dev server that pinned a
+        core for an hour four days ago reads near zero. It is the right answer to
+        a different question: has this process been grinding the entire time it
+        has existed? A momentary spike cannot move it, so pairing it with the
+        live `cpu` separates a daemon stuck in a loop from an app that is briefly
+        busy.
+        """
+        return 100.0 * self.cpu_seconds / self.age_seconds if self.age_seconds > 0 else 0.0
 
     @property
     def memory(self) -> int:
@@ -357,7 +372,7 @@ class ProcessSampler:
             name = path.rsplit("/", 1)[-1] or path
             procs.append(Process(
                 pid=pid, name=name, path=path, rss=rss, ppid=ppid,
-                cpu=max(0.0, cpu), age_seconds=age,
+                cpu=max(0.0, cpu), age_seconds=age, cpu_seconds=cpu_time,
                 children=child_count.get(pid, 0),
             ))
 
@@ -572,6 +587,7 @@ class Listener:
     rss: int = 0
     label: str = ""
     is_project: bool = False
+    session_owner: str = ""
 
 
 def listeners() -> list[Listener]:
@@ -606,6 +622,51 @@ def listeners() -> list[Listener]:
                     found[key] = Listener(port=port, pid=pid, proto=proto)
 
     return sorted(found.values(), key=lambda item: (item.port, item.pid))
+
+
+# An agent session started from a project directory leaves helpers that listen on
+# a port, sit in that project's cwd, and outlive any sane "stale" threshold — so
+# every test a dev-server sweep applies says yes. Killing one silently breaks the
+# tools of a session that is still running.
+DEFAULT_SESSION_OWNERS: list[str] = ["claude", "codex", "cursor", "windsurf"]
+
+
+def mark_session_owned(listener_list: list[Listener], cfg: dict | None = None,
+                       tree: dict[int, tuple[int, str]] | None = None) -> None:
+    """Name the live agent session that owns each listener, where there is one.
+
+    Ancestry, never the process's own argv — the same rule `sessions()` is built
+    on, and for the same reason. A helper does not repeat its parent's identity:
+    `plannotator` is spelled exactly like a project binary, and only its ppid
+    chain reveals it is a child of a running `claude`.
+
+    That the check is against a LIVE ancestor is what keeps it from being too
+    broad. A dev server whose session has since exited reparents to launchd, so
+    the chain ends at pid 1, it is correctly left claimable, and the guard costs
+    a genuine leftover nothing.
+    """
+    owners = [n.lower() for n in (cfg or {}).get("session_owners", DEFAULT_SESSION_OWNERS)]
+    if not owners or not listener_list:
+        return
+    tree = tree if tree is not None else _ps_tree()
+
+    def owner_of(pid: int) -> str:
+        seen = set()
+        cur = tree.get(pid, (0, ""))[0]
+        while cur > 1 and cur not in seen:
+            seen.add(cur)
+            binary = tree.get(cur, (0, ""))[1].split(" ", 1)[0].rsplit("/", 1)[-1].lower()
+            for name in owners:
+                if binary == name:
+                    return name
+            cur = tree.get(cur, (0, ""))[0]
+        return ""
+
+    resolved: dict[int, str] = {}
+    for item in listener_list:
+        if item.pid not in resolved:
+            resolved[item.pid] = owner_of(item.pid)
+        item.session_owner = resolved[item.pid]
 
 
 def cwd_for_pids(pids: list[int]) -> dict[int, str]:
@@ -1030,6 +1091,80 @@ def windowserver_diagnosis(ps_output: str) -> list[Finding]:
     return findings
 
 
+# ── stuck background work ────────────────────────────────────────────────────
+
+
+@dataclass
+class Grinder:
+    pid: int
+    name: str
+    cpu: float             # live, this sample
+    lifetime_pct: float    # average across its whole life
+    age_seconds: float
+    cpu_seconds: float
+    cause: str = ""        # plain-English explanation when the daemon is known
+    remedy: str = ""
+
+
+# Background work that has no window and therefore no obvious way to notice it is
+# running. Each entry is matched on the process name and answers the two questions
+# a person actually has: what started this, and how do I stop it.
+KNOWN_GRINDERS: dict[str, tuple[str, str]] = {
+    "StorageManagementService": (
+        "the System Settings > Storage pane is open and still scanning",
+        "close that pane, or terminate the process — it reopens cleanly",
+    ),
+    "ApplicationsStorageExtension": (
+        "the System Settings > Storage pane is measuring installed apps",
+        "close that pane, or terminate the process — it reopens cleanly",
+    ),
+    "Storage": (
+        "the System Settings > Storage pane itself",
+        "close that pane, or terminate the process — it reopens cleanly",
+    ),
+    "mds_stores": ("Spotlight is indexing", "let it finish, or exclude the volume in Spotlight settings"),
+    "mdworker_shared": ("Spotlight is indexing a specific file set", "let it finish; it stops on its own"),
+    "photoanalysisd": ("Photos is analysing the library for faces and scenes", "let it finish, or quit Photos"),
+    "backupd": ("Time Machine is running a backup", "let it finish, or skip this backup"),
+    "cloudd": ("iCloud is syncing", "let it finish; check iCloud status in System Settings"),
+    "bird": ("iCloud Drive is syncing files", "let it finish; check iCloud Drive status"),
+    "AssetCacheManagerService": ("content caching is serving or fetching Apple assets", "disable Content Caching in Sharing settings"),
+}
+
+
+def grinding(procs: list[Process], cfg: dict) -> list[Grinder]:
+    """Processes that have been burning CPU for hours, not just spiking now.
+
+    Two conditions, and needing both is the whole point. Live CPU alone flags
+    every compile and every video decode. Lifetime average alone flags a process
+    that worked hard early and has since gone quiet. Together they describe
+    something that is busy now AND has been busy the entire time it has existed,
+    which is what a stuck daemon looks like and what ordinary work does not.
+
+    Nothing else on the dashboard can surface these: a stuck daemon has no window,
+    no port and little memory, so every other section renders it as unremarkable.
+    """
+    th = cfg.get("thresholds", {})
+    live_min = th.get("grind_cpu_pct", 25.0)
+    lifetime_min = th.get("grind_lifetime_pct", 15.0)
+    age_min = th.get("grind_min_hours", 2.0) * 3600
+
+    mine = {os.getpid(), os.getppid()}
+    found: list[Grinder] = []
+    for proc in procs:
+        if proc.pid in mine or proc.age_seconds < age_min:
+            continue
+        if proc.cpu < live_min or proc.lifetime_cpu_pct < lifetime_min:
+            continue
+        cause, remedy = KNOWN_GRINDERS.get(proc.name, ("", ""))
+        found.append(Grinder(
+            pid=proc.pid, name=proc.name, cpu=proc.cpu,
+            lifetime_pct=proc.lifetime_cpu_pct, age_seconds=proc.age_seconds,
+            cpu_seconds=proc.cpu_seconds, cause=cause, remedy=remedy,
+        ))
+    return sorted(found, key=lambda g: -g.cpu_seconds)
+
+
 # ── derived attention items ──────────────────────────────────────────────────
 
 
@@ -1382,6 +1517,20 @@ def attention(
     th = cfg.get("thresholds", {})
     alerts: list[Alert] = []
 
+    for grind in grinding(procs, cfg):
+        detail = (
+            f"{grind.name} has used {grind.cpu_seconds / 60:.0f} min of CPU over "
+            f"{grind.age_seconds / 3600:.1f}h ({grind.lifetime_pct:.0f}% sustained, "
+            f"{grind.cpu:.0f}% now)"
+        )
+        if grind.cause:
+            alerts.append(Alert("warn", f"{detail} — {grind.cause}; {grind.remedy}"))
+        else:
+            alerts.append(Alert("warn", (
+                f"{detail} — stuck background work, nothing on screen will show it "
+                f"(pid {grind.pid})"
+            )))
+
     if mem.available and mem.swap_pct >= th.get("swap_crit", 60):
         alerts.append(Alert("crit", (
             f"Swap {mem.swap_pct:.0f}% full ({_g(mem.swap_used)} of {_g(mem.swap_total)}) — "
@@ -1401,7 +1550,9 @@ def attention(
     # Only sockets whose cwd sits under a project root count as dev servers.
     # A daemon rooted at "/" or in ~/Library is not one, and counting those turned
     # both checks below into noise (Anytype alone contributed eight "servers").
-    dev = [item for item in listener_list if item.is_project]
+    # A helper belonging to a live agent session passes both of those tests and is
+    # still not a dev server, so it is excluded here as well as at the kill site.
+    dev = [item for item in listener_list if item.is_project and not item.session_owner]
 
     # Two distinct processes serving from the same project directory is almost
     # always a leftover from an earlier session nobody shut down.

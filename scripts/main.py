@@ -147,6 +147,8 @@ class Monitor:
             item.label = config_mod.label_for_port(item.port, cfg)
             visible.append(item)
 
+        collect.mark_session_owned(visible, cfg)
+
         # Collected here rather than inside the render: the diagnosis shells out
         # to system_profiler and ps, and running that from a draw function put
         # 40 subprocess spawns behind every keypress.
@@ -1357,12 +1359,22 @@ def main() -> int:
     if args.reclaim:
         snap = monitor.snapshot()
         hours = cfg["thresholds"].get("stale_server_hours", 24)
-        stale = {
-            item.pid: item for item in snap["listeners"]
+        aged = [
+            item for item in snap["listeners"]
             if item.is_project and item.age_seconds >= hours * 3600
-        }
+        ]
+        stale = {item.pid: item for item in aged if not item.session_owner}
+        spared = {item.pid: item for item in aged if item.session_owner}
         canvas = Canvas(theme_early, render.term_width())
         draw_reclaim(canvas, list(stale.values()), hours)
+        # Named, never silently filtered: a sweep that drops targets without
+        # saying so reads as "nothing else was there".
+        for item in sorted(spared.values(), key=lambda i: -i.age_seconds):
+            canvas.wrapped(
+                f"spared :{item.port} {item.name} (pid {item.pid}) — "
+                f"belongs to a live {item.session_owner} session, not a dev server",
+                canvas.t.dim,
+            )
         print(canvas.render())
         if not stale:
             return 0

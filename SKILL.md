@@ -6,13 +6,17 @@ description: >
   process", "check temperature", "how hot is my mac", "why is my mac hot", "why is my mac slow",
   "why is WindowServer high", "what can I delete", "free up disk space", "find stale dev servers",
   "why is System Data so big", "kenapa System Data gede banget", "apaan 180GB System Data",
+  "panas nih", "kok panas padahal nggak ngapa-ngapain", "what's grinding in the background",
   or wants a system overview of their macOS machine. Also trigger proactively when the user asks to
   stop or restart a service and needs to identify its PID first. Reports real die temperature in °C,
   memory including compressed pages and swap, live per-process CPU, every listening port mapped to
   the project it was started from, Docker, disk, battery, reclaimable space, and orphaned automation
-  browsers. Also groups any process family into sessions ("kill the playwright chromes", "kill the
-  test browsers", "what automation is still running", "list MCP servers") and terminates them one
-  session at a time with confirmation, leaving the user's own apps untouched.
+  browsers. Catches stuck background work — a Settings pane, Spotlight, Photos or an iCloud sync
+  grinding for hours with no window to show it — which is the usual answer when the machine feels
+  warm but the temperatures read normal. Also groups any process family into sessions ("kill the
+  playwright chromes", "kill the test browsers", "what automation is still running", "list MCP
+  servers") and terminates them one session at a time with confirmation, leaving the user's own apps
+  untouched.
 ---
 
 ## What this skill does
@@ -59,7 +63,7 @@ Before quoting a figure to the user or drawing a conclusion from it, consult
 `references/metrics.md` — it covers what each metric actually measures, which ones supersede the
 obvious source, and the readings that are structurally unavailable on Apple Silicon.
 
-Three that matter most often:
+The ones that matter most often:
 
 - **Do not quote `RSS` as a process's memory.** The `MEM` column is physical footprint; a process
   that macOS has compressed shows a tiny RSS and a large footprint. Measured here: 3 MB RSS against
@@ -68,6 +72,26 @@ Three that matter most often:
 - **Do not conclude "plenty of RAM free" from the memory row alone.** Read `SWAP` beside it.
 - **Do not quote a `du`-derived size as reclaimable disk.** `du`, `--space` and macOS's own Storage
   pane all bill an APFS clone at full size. See below.
+- **Do not report swap percentage as a before/after figure.** macOS shrinks the swap *file* as
+  pressure falls, so both halves of the ratio move together and a real improvement reads as none.
+  Measured here: `7.95G / 9.2G` → `4.32G / 5.0G` is 86% → 84%, and 3.6 GB of paging going away.
+  Quote the absolute used figure; treat the file shrinking as itself the evidence.
+
+## A warm machine with ordinary temperatures
+
+Answer "why is it hot" from **NEEDS ATTENTION**, not from the °C in THERMAL. A die at 50 °C with
+`Nominal` pressure rules out a thermal fault; it does not rule out sustained work, and sustained work
+is what actually warms the chassis.
+
+The section flags **stuck background work** — a process that is busy in this sample *and* has been
+busy across its entire life. Both conditions are required, which is what separates a daemon looping
+forever from a compile that is briefly busy. The usual culprits have no window, no port and little
+memory, so every other section renders them as unremarkable: a Settings pane left open, Spotlight
+indexing, Photos analysing, an iCloud sync. Known daemons are named with a cause and a remedy;
+anything else is reported with its pid.
+
+Corroborate with `sys` CPU time and `kernel_task` rather than temperature — a stuck daemon shows up
+there long before it shows up in degrees.
 
 ## Apparent size is not disk space
 
@@ -133,6 +157,20 @@ throwaway `--user-data-dir`, a daemon's session name) refused it while still all
 target. Any new caller of `terminate`/`terminate_all` passes a mark when it has one — targets may be
 `(pid, name)` or `(pid, name, mark)`.
 
+**A listening socket in a project directory is not proof of a dev server.** An agent CLI started
+from a repo leaves helpers that listen on a port, sit in that repo's cwd, and outlive any sane stale
+threshold — so every test `--reclaim` applies says yes, and killing one breaks the tools of a session
+that is still running. `mark_session_owned` resolves each listener's ancestry and spares anything
+descended from a live `claude`/`codex`/`cursor`/`windsurf` (the list is `[sessions] owners` in
+config). Ancestry, never the process's own argv: a helper does not repeat its parent's identity.
+Spared targets are **printed with the reason**, never filtered out silently. A leftover whose session
+has exited reparents to launchd, so the guard costs a genuine stale server nothing.
+
+**Never build a kill list by sorting listeners on age.** Doing that by hand here put the user's own
+terminal, their cloud-sync client and two live-session helpers in the candidate set — the terminal
+being the one that would have taken every backgrounded process with it. Use `--reclaim`, or match on
+what a process *is* (its full argv path and its ancestry).
+
 When the user asks to kill something: run a snapshot, identify the PID, **confirm which PID with the
 user**, then act. For a port, `lsof -nP -iTCP:<PORT> -sTCP:LISTEN -t` — `-sTCP:LISTEN` is not
 optional, since a bare `lsof -ti:<PORT>` also matches client connections and can kill the user's
@@ -163,9 +201,15 @@ thresholds, or collectors. `--show <scenario>` prints one for eyeballing.
 each guard in **both** directions — a check that only ever refuses is indistinguishable from a broken
 one. Run it after any change to `clones.py` or to the directory half of `actions.py`.
 
+`python3 tests/test_grind_and_sessions.py` covers stuck-daemon detection and the live-session guard,
+each paired with the lookalike it must let through — a fresh spike, a process that idled most of its
+life, a leftover reparented to launchd, a binary whose name merely contains `claude`. Run it after
+any change to `grinding`, `mark_session_owned`, or the `--reclaim` candidate set.
+
 ## Additional resources
 
 - **`references/metrics.md`** — what every metric actually measures, and the wrong readings to avoid.
 - **`references/troubleshooting.md`** — degraded sources, permissions, and what each blank section means.
 - **`tests/eval_scenarios.py`** — the failure-condition eval suite.
 - **`tests/test_clones.py`** — clone detection, removal guards, and the apparent-vs-real measurement.
+- **`tests/test_grind_and_sessions.py`** — stuck-daemon detection and the live-session kill guard.

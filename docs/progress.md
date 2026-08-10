@@ -1,5 +1,63 @@
 # machine-monitor Progress
 
+## Session — 2026-08-10 (cont) — v2.3.0 (stuck background work, and a kill guard for live agent sessions)
+
+Both changes came out of a live "panas nih coba cek" diagnosis rather than a feature request, and
+both are things the dashboard could not previously see. The heat had no thermal explanation at all —
+CPU die 50.1 C, GPU 52.9 C, pressure Nominal — while `kernel_task` sat at 20.8% and the chassis was
+warm. The cause was three storage daemons (`StorageManagementService`, `ApplicationsStorageExtension`,
+`Storage.appex`) grinding at a combined ~140% for 7h48m because a System Settings > Storage pane had
+been left open during an earlier System Data investigation. They have no window, no port and little
+memory, so every existing section rendered them as unremarkable. Fix is `collect.grinding()` plus a
+`Grinder` dataclass, feeding `attention()`. The discriminator is requiring the live CPU delta AND a
+new `Process.lifetime_cpu_pct` (cumulative CPU time over wall age) to be high at once: live alone
+flags every compile, lifetime alone flags a process that worked hard early and went quiet. That
+second figure is exactly what `ps %CPU` reports, which `references/metrics.md` had (correctly)
+written off as decorative for "what is busy now" — the reference now carries both readings instead of
+one, since it is the right answer to a different question. `ProcessSampler` already parsed cumulative
+CPU time and was discarding it, so the collector change was one field. Calibration on this machine:
+the stuck daemon sat at 34% sustained while WindowServer (13.8%) and Docker's VM host (11.5%) fall
+just under the 15% default, a >2x separation. `KNOWN_GRINDERS` maps a handful of windowless daemons
+(Storage pane, Spotlight, Photos analysis, iCloud, Time Machine, content caching) to a cause and a
+remedy; anything unrecognised is still reported, with its pid and no invented explanation.
+
+The second change is a genuine safety bug found while cleaning up: `--reclaim`'s candidate set was
+`is_project and age >= stale_hours` with `terminate_all` called with neither an argv mark nor an
+`lstart`, and a dry run proved it would have terminated `plannotator` — a helper of a `claude` session
+that had been running four days. An agent CLI started inside a repo leaves helpers that pass every
+test a dev-server sweep applies: right cwd, listening port, old. New `collect.mark_session_owned()`
+walks each listener's ppid chain and marks anything descended from a live `claude`/`codex`/`cursor`/
+`windsurf` (configurable via a new `[sessions] owners`), reusing the existing `_ps_tree()` rather than
+adding a second ancestry primitive. Ancestry, never the process's own argv — `plannotator` is spelled
+like an ordinary project binary and only its parent reveals what it is, the same reason `sessions()`
+groups by ancestry. The guard is deliberately narrow: a leftover whose session exited reparents to
+launchd, so the chain ends at pid 1 and a genuine stale server stays claimable. `attention()` excludes
+owned listeners from the stale count too, and `--reclaim` prints each spared target with its reason
+rather than filtering silently. `config.py` only sets `session_owners` when the user wrote a non-empty
+list, so a missing section cannot read as "no owners" and disable the guard.
+
+Two artifacts from the same session were deliberately NOT folded in: an ad-hoc kill loop (weaker than
+the existing `actions.py`, which already has the `lstart` reuse guard, zombie-aware `_alive` and
+`PROTECTED_NAMES`) and an ad-hoc listener classifier (`is_project` already excludes the Warp/OneDrive
+shapes it was written for; only the ancestry half was new). Adding either would have been a second
+divergent implementation of something that already has an owner.
+
+Verified: `tests/test_grind_and_sessions.py` added, 20 assertions, every catch paired with the
+lookalike it must let through (fresh spike, old-but-idle, old-but-bursty, launchd-reparented orphan,
+a binary merely *containing* `claude`, a cyclic parent chain, an empty owner list). 20 passed / 0
+failed; `test_clones.py` 27 passed, `eval_scenarios.py` 11/11 — no regression. `--reclaim --dry-run`
+against the live machine went from "1 process would be terminated" to "0 targets, 1 spared" naming
+the claude session. End-to-end proof of the detector used two real spawned processes at shipped
+thresholds (only `grind_min_hours` relaxed, since a test cannot wait two hours): the busy one
+measured 99.0% live / 100.2% lifetime and produced a real alert, the sleeping sibling measured 0/0 and
+did not. Reopening the Settings pane to reproduce the original daemon did not restart the scan, so
+that path is unproven this session and is noted rather than claimed. Files touched: `scripts/collect.py`,
+`scripts/main.py`, `scripts/config.py`, `scripts/config.ini`, `SKILL.md`, `references/metrics.md`,
+`tests/test_grind_and_sessions.py`. Follow-up worth considering: `KNOWN_GRINDERS` is a code-level
+table and would be better as config once a second machine disagrees about what counts as a culprit.
+
+---
+
 ## Session — 2026-08-10 (cont) — v2.2.0 (code-sign clone litter, and apparent size stops being quoted as disk)
 
 Came out of a live diagnosis, not a feature request: macOS Settings reported **System Data 180.52 GB**

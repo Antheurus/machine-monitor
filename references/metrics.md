@@ -51,17 +51,29 @@ catch pid reuse, so a decorated name makes every kill of a resolved helper refus
 exits non-zero whenever any single fd is unreadable, so its stdout is read regardless of return code
 rather than through `run()`, which returns `''` on a non-zero exit.
 
-## CPU per process — live, not lifetime
+## CPU per process — two different figures, both real
 
 `ps aux`'s `%CPU` is an average over the entire life of the process. For a dev server running four
 days it barely moves regardless of what it is doing right now, which makes a "top CPU" table built on
 it decorative.
 
-This tool differences each process's cumulative CPU time across a real wall-clock window
+So the `CPU%` column differences each process's cumulative CPU time across a real wall-clock window
 (`cpu_sample_seconds`, default 0.5 s) — the same arithmetic `top` performs internally, over an
 interval we control and across every process rather than top's truncated list.
 
 A multi-threaded process legitimately exceeds 100%: that is cores, not a bug.
+
+**The lifetime average is not junk, though — it answers a different question, and it is the one
+question no other metric here can answer.** `Process.lifetime_cpu_pct` (cumulative CPU time over wall
+age, i.e. what `ps %CPU` reports) says whether a process has been grinding the *whole time it has
+existed*. A momentary spike cannot move it, so pairing it with the live figure separates a daemon
+stuck in a loop from an app that is briefly busy — which is exactly what `grinding()` does, requiring
+both to be high at once. Neither figure alone works: live CPU alone flags every compile, and the
+lifetime average alone flags a process that worked hard early and has since gone quiet.
+
+Calibration measured on this machine: a stuck storage daemon sat at 34% sustained across 7h48m, while
+WindowServer (13.8%) and a VM host process (11.5%) sit just under the 15% default — more than a 2x
+separation between the pathological case and the busiest legitimate ones.
 
 ## System memory — the compressor is the missing term
 

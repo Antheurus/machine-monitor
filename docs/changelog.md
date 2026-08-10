@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.3.0 — Find out why the Mac is warm when the temperatures look fine
+
+- **New: it now spots background work that is stuck.** Some things macOS runs have no window, so
+  there is nothing to close and nothing to notice — they just quietly use a chunk of your CPU for
+  hours. On this Mac, leaving the **System Settings > Storage** panel open had three of them running
+  for **7 hours 48 minutes**. The machine felt warm, and every temperature reading looked completely
+  normal, so nothing pointed at the cause.
+- **It tells you what started it and how to stop it.** For the ones it recognises — the Storage
+  panel, Spotlight indexing, Photos analysing your library, iCloud syncing, Time Machine — you get a
+  plain sentence naming the cause and the fix. Anything else is reported with its process ID.
+- **It will not flag your actual work.** A build or a video export is busy too. Something is only
+  reported when it has been busy *the whole time it has existed*, which a normal task never is.
+- **Fixed: cleaning up old dev servers could kill a running Claude/Codex session's helpers.** If you
+  start an agent CLI inside a project folder, it leaves helpers that look exactly like a forgotten
+  dev server — same folder, listening on a port, running for days. `--reclaim` would have terminated
+  one. It now checks what started each process and skips anything belonging to a session that is
+  still open, listing what it skipped and why rather than quietly leaving it out.
+- **Note on the swap figure after a cleanup:** the percentage can barely move even when things
+  genuinely improved, because macOS shrinks the swap file at the same time. The tool now says so, and
+  quotes the actual gigabytes instead.
+
 ## v2.2.0 — Find out why "System Data" says 180 GB, and get an honest answer
 
 - **New `--clones`: the usual reason your Mac claims a huge "System Data".** Every time an app's

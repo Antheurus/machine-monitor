@@ -114,6 +114,15 @@ def _parse(parser: configparser.ConfigParser) -> dict[str, Any]:
             if found:
                 cfg["process_families"][label.strip()] = found
 
+    # Only set when the user actually wrote a non-empty list. Writing [] for a
+    # missing section would read to collect.mark_session_owned as "no owners" and
+    # silently disable the guard that stops a live session's helper being killed —
+    # a config file's absence must never turn a safety check off.
+    if parser.has_section("sessions"):
+        owners = _split_list(parser.get("sessions", "owners", fallback=""))
+        if owners:
+            cfg["session_owners"] = owners
+
     if parser.has_section("port_ranges"):
         for span, label in parser.items("port_ranges"):
             low, _, high = span.partition("-")
