@@ -1,5 +1,53 @@
 # machine-monitor Progress
 
+## Session — 2026-08-31 — v2.4.0 (a demo GIF for the README, generated rather than recorded)
+
+The README had no image, so the ask was a GIF of the dashboard for the repo front page. The first
+attempt was the obvious one — screen-record the real dashboard and cut 00:16–01:16 out of the `.mov`
+with ffmpeg — and it produced a perfectly good 8.55 MB GIF that must not be published. This repo is
+PUBLIC, and the real dashboard's whole selling point is that it maps every listener to the project
+directory it came from, so the frame carried nine client/project names out of `SERVERS RUNNING`,
+six more out of the Docker container list, the automation session names from `--sessions`, and the
+operator's home path in the footer. Cropping cannot fix it: the project column *is* the feature
+being demonstrated. The user chose to re-shoot against fictional data rather than blur it.
+
+`tests/demo_render.py` builds a plausible machine and hands it to the real renderer via
+`app.build(snap, cfg, Theme(True), "once")` — the same entry point `tests/eval_scenarios.py` already
+used, which is what made this cheap. The shipped scenarios were the obvious thing to reuse and were
+wrong for it: they carry one listener and processes named `proc0`–`proc13`, which renders a sparse
+dashboard that reads as broken rather than as a demo. So the demo snapshot is its own thing — twelve
+listeners, six containers, twelve processes, sized so every section lights up including the two that
+only appear under load (`NEEDS ATTENTION`, and `WINDOWSERVER DIAGNOSIS`, which is gated at 15% CPU).
+Names follow the seed-data rule: `acme-storefront`, `northwind-admin`, `orbit-dashboard`,
+`atlas-scraper` — real-shaped, real-length, not `TEST_PROJECT_1`. Three things had to be neutralised
+beyond the project column, and two of them were only found by looking at a rendered frame:
+the Docker container names, the `--sessions` labels, and `config_mod.CONFIG_PATH`, which the footer
+prints verbatim and which carried `/Users/macbook/` into all 45 frames.
+
+A static snapshot makes a dead GIF, so `snapshot()` takes a `tick` and animates only what a real
+machine moves between samples — core load, per-process CPU, throughput, die temperature, thermal
+power. Ports, ages and container names stay put, because those are what a viewer is actually
+reading. The payoff was unplanned: because TOP CPU sorts on the animated figure, the rows re-order
+across frames on their own, and WindowServer visibly climbs the table.
+
+`tests/ansi_to_gif.py` renders the frames to PNG with PIL and Menlo and stitches the GIF directly,
+so no screen recording is involved at all — no window chrome, no cursor, no capture noise on the
+text, and it is reproducible. It implements only the SGR codes this dashboard emits (0, 1, 2, and
+`38;5;N`) plus the xterm-256 palette; `--strict` turns an unhandled code into a hard failure so a
+future renderer change cannot silently degrade the image rather than announcing itself. Verified by
+reading the artifact back rather than trusting the encoder: 45 frames all distinct after
+quantisation, and two extracted frames inspected by eye — which is how the footer path leak and the
+`⚠` glyph question were settled (Menlo does carry U+26A0; it is just squat at 13px, so it matches
+what the real terminal shows). Output is 992x1814, 45 frames at 6 fps, 6.52 MB, under GitHub's
+practical README ceiling.
+
+Left alone deliberately: `scripts/collect.py`, `scripts/main.py`, `references/metrics.md`,
+`references/troubleshooting.md` and `tests/test_orphan_naming.py` were already modified in the
+working tree at session start and belong to another session, so staging was path-scoped to the four
+files this session wrote. All three existing suites re-run green afterwards — 11/11 scenarios, 27
+clone tests, 20 grind/session tests — and `scripts/` was never touched, so that was a regression
+check on the shared renderer, not a formality.
+
 ## Session — 2026-08-10 (cont) — v2.3.0 (stuck background work, and a kill guard for live agent sessions)
 
 Both changes came out of a live "panas nih coba cek" diagnosis rather than a feature request, and

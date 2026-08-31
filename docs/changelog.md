@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.4.0 — The README now shows you what the tool looks like
+
+- **There is a demo GIF at the top of the README.** Previously you had to install it to find out
+  what it rendered.
+- **The machine in that GIF is made up, on purpose.** A screen recording of the real dashboard would
+  publish whatever you happen to be running — your project folder names, your Docker container
+  names, your automation sessions. The demo invents a plausible machine instead, so nothing of
+  yours ends up in the picture.
+- **You can regenerate it yourself** with `python3 tests/ansi_to_gif.py`. No screen recorder and no
+  extra software to install; it draws the frames directly. `python3 tests/demo_render.py --loop 60`
+  gives you the animated version in your own terminal if you would rather record it.
+
+No action required, and nothing about how the tool reads your machine has changed.
+
 ## v2.3.0 — Find out why the Mac is warm when the temperatures look fine
 
 - **New: it now spots background work that is stuck.** Some things macOS runs have no window, so

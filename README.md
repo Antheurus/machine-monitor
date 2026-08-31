@@ -7,6 +7,11 @@ an automatic WindowServer diagnosis when compositing goes hot.
 
 Built for Apple Silicon, where the usual answers are wrong. Zero dependencies — system `python3`.
 
+![machine-monitor rendering a full dashboard](docs/demo.gif)
+
+<sub>Generated, not recorded — the machine above is fictional, so the frame shows the tool rather
+than whatever the author happened to be running. `python3 tests/ansi_to_gif.py`.</sub>
+
 ## Why it exists
 
 Three things about macOS make "why is my Mac hot / slow" harder than it should be, and the obvious
@@ -118,6 +123,23 @@ apparent against 13.4 GB of real blocks.
 python3 tests/eval_scenarios.py   # renders 11 synthetic machines, asserts colours/alerts/widths
 python3 tests/test_clones.py      # clone detection and removal guards, proved in both directions
 ```
+
+## Regenerating the demo GIF
+
+The dashboard reads the real machine, so a screen recording of it publishes whatever the operator is
+running — project directory names, Docker container names and automation session names all reach the
+frame. The README media is built from a fictional machine instead, and rendered straight from the
+ANSI rather than captured, so there is no window chrome, no cursor and no compression noise on the
+text.
+
+```bash
+python3 tests/demo_render.py              # one frame, to eyeball it
+python3 tests/demo_render.py --loop 60    # animated in the terminal, if you do want to record
+python3 tests/ansi_to_gif.py --frames 45 --fps 6 --strict --out docs/demo.gif
+```
+
+`--strict` fails on any escape sequence the little ANSI parser does not implement, so a change to
+the renderer cannot silently degrade the image.
 
 ## Configuration
 
