@@ -162,3 +162,17 @@ which 1 was real.
 
 The needle is assembled at runtime and the tool's own pid and parent are excluded, because a probe
 that searches for a literal it also contains finds itself.
+
+## macOS metric probes that lie — the four readings and their fixes
+
+_linked from ../rules/gotcha-coding.md of E3_
+
+**(a) Die temperature.** Apple Silicon DOES have a readable die temperature, and the belief that it does not is the confident kind of wrong because the usual probe genuinely fails: `powermetrics` reports thermal *pressure* only and its `smc` sampler does not exist on arm64, so anyone testing that route concludes the sensor is absent. The private `IOHIDEventSystemClient` HID services expose it — no sudo, no install, ~90 lines of `ctypes`. Filter `PMU tcal` out of any average: it is a calibration constant that never moves and drags the die figure several degrees.
+
+**(b) CPU.** `ps aux`'s `%CPU` is a lifetime average since process start, not current load, so a dev server pinning a core for days reads near zero and a "top CPU" table built on it is decorative. Difference each process's cumulative CPU time over a wall-clock window: `ps -eo pid=,time=` twice, ~0.5s apart.
+
+**(c) Memory.** `vm_stat`'s page size is 16384 on Apple Silicon, not 4096, and "used = active + wired" omits the compressor, which is the largest category on a loaded machine — the naive formula reports a comfortable machine that is thrashing. Read the page size from `vm_stat`'s own header line, use htop's `wired + active − purgeable + compressed`, and always show `sysctl vm.swapusage` beside it.
+
+**(d) Ports.** `lsof | awk '/LISTEN/'` structurally cannot see UDP, and its columnar output breaks on IPv6 `[::1]:5432`. Use `lsof -nP -F pn` field mode and parse it.
+
+**Two rendering traps in the same family.** BSD `seq` counts DOWN when first > last, so the near-universal bar idiom `printf '█%.0s' $(seq 1 $filled)` draws 2 filled cells at 0%. And `printf '%-22b'` pads on ANSI byte count, so pad on visible width with the escapes stripped and truncate the plain text *before* colorizing, never after.

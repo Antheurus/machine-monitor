@@ -148,6 +148,7 @@ class Monitor:
             visible.append(item)
 
         collect.mark_session_owned(visible, cfg)
+        stacks = collect.detached_stacks(procs, cfg, {item.pid for item in listener_list})
 
         # Collected here rather than inside the render: the diagnosis shells out
         # to system_profiler and ps, and running that from a draw function put
@@ -197,7 +198,8 @@ class Monitor:
             "temperatures": temps,
             "thermal": results["thermal"],
             "windowserver": windowserver,
-            "alerts": collect.attention(mem, disk, visible, procs, cfg),
+            "stacks": stacks,
+            "alerts": collect.attention(mem, disk, visible, procs, cfg, stacks=stacks),
             "loadavg": os.getloadavg(),
         }
 
@@ -889,6 +891,33 @@ def draw_reclaim(c: Canvas, stale: list, hours: float) -> None:
     } for item in sorted(stale, key=lambda i: -i.age_seconds)])
 
 
+def draw_stacks(c: Canvas, stacks: list) -> None:
+    t = c.t
+    c.section(
+        "DETACHED DEV STACKS",
+        f"{len(stacks)} with no listening port, holding {human_bytes(sum(s.memory for s in stacks))}",
+    )
+    if not stacks:
+        c.raw(f"  {t.ok}✓{t.reset} {t.dim}no dev tree outlived its session without a port{t.reset}")
+        return
+    specs = [
+        Column("pid", "ROOT", 7, "right", priority=9),
+        Column("procs", "PROCS", 6, "right", priority=7),
+        Column("age", "AGE", 8, "right", priority=8),
+        Column("mem", "MEM", 8, "right", priority=9),
+        Column("cmd", "COMMAND", 28, "left", priority=6),
+        Column("cwd", "PROJECT", 26, "left", priority=9),
+    ]
+    c.table(specs, [{
+        "pid": (str(item.pid), t.pid),
+        "procs": (str(len(item.pids)), t.dim),
+        "age": (human_duration(item.age_seconds), t.warn),
+        "mem": (human_bytes(item.memory), t.info),
+        "cmd": (item.args, t.value),
+        "cwd": (item.cwd, t.accent),
+    } for item in stacks])
+
+
 def confirm_destructive(count: int, what: str, assume_yes: bool,
                         noun: str = "process(es)") -> bool:
     """Require the word 'yes', typed, before anything is signalled.
@@ -933,9 +962,9 @@ def draw_footer(c: Canvas, cfg: dict) -> None:
     c.raw("")
     c.rule()
     c.fields([
-        f"{t.label}kill by PID{t.reset} {t.kill}kill -9 <PID>{t.reset}",
+        f"{t.label}kill by PID{t.reset} {t.kill}kill <PID>{t.reset}",
         f"{t.label}kill a port's listener{t.reset} "
-        f"{t.kill}lsof -nP -iTCP:<PORT> -sTCP:LISTEN -t | xargs kill -9{t.reset}",
+        f"{t.kill}lsof -nP -iTCP:<PORT> -sTCP:LISTEN -t | xargs kill{t.reset}",
     ])
     c.wrapped(
         "-sTCP:LISTEN matters: a bare `lsof -ti:<port>` also matches CLIENT "
@@ -1056,6 +1085,7 @@ def to_json(snap: dict) -> str:
         "listeners": [dataclasses.asdict(item) for item in snap["listeners"]],
         "containers": [dataclasses.asdict(item) for item in snap["containers"]],
         "alerts": [dataclasses.asdict(item) for item in snap["alerts"]],
+        "detached_stacks": [dataclasses.asdict(item) for item in snap.get("stacks", [])],
         "top_cpu": [proc(p) for p in sorted(snap["processes"], key=lambda p: p.cpu, reverse=True)[:15]],
         # Ranked by footprint, matching the rendered table: RSS put the largest
         # consumer on this machine fourth, which is the whole reason MEM exists.
@@ -1353,7 +1383,10 @@ def main() -> int:
         if not confirm_destructive(len(orphans), "terminate", args.yes):
             return 1
         return report_kills(actions.terminate_all(
-            [(o.pid, o.binary) for o in orphans], confirm=True, dry_run=args.dry_run,
+            # The profile is the argv mark: it is what matched these processes,
+            # so every one of them carries it and a recycled pid cannot.
+            [(o.pid, o.binary, o.profile) for o in orphans],
+            confirm=True, dry_run=args.dry_run,
         ))
 
     if args.reclaim:
@@ -1365,8 +1398,10 @@ def main() -> int:
         ]
         stale = {item.pid: item for item in aged if not item.session_owner}
         spared = {item.pid: item for item in aged if item.session_owner}
+        stacks = snap["stacks"]
         canvas = Canvas(theme_early, render.term_width())
         draw_reclaim(canvas, list(stale.values()), hours)
+        draw_stacks(canvas, stacks)
         # Named, never silently filtered: a sweep that drops targets without
         # saying so reads as "nothing else was there".
         for item in sorted(spared.values(), key=lambda i: -i.age_seconds):
@@ -1376,14 +1411,20 @@ def main() -> int:
                 canvas.t.dim,
             )
         print(canvas.render())
-        if not stale:
+        targets = [(item.pid, item.name) for item in stale.values()]
+        # The whole tree, supervisor included: killing only the child of a
+        # watcher gets it respawned. lstart proves each pid is the same instance.
+        by_pid = {p.pid: p for p in snap["processes"]}
+        for stack in stacks:
+            targets += [
+                (pid, by_pid[pid].name, "", stack.starts.get(pid, ""))
+                for pid in stack.pids if pid in by_pid
+            ]
+        if not targets:
             return 0
-        if not confirm_destructive(len(stale), "terminate", args.yes):
+        if not confirm_destructive(len(targets), "terminate", args.yes):
             return 1
-        return report_kills(actions.terminate_all(
-            [(item.pid, item.name) for item in stale.values()],
-            confirm=True, dry_run=args.dry_run,
-        ))
+        return report_kills(actions.terminate_all(targets, confirm=True, dry_run=args.dry_run))
 
     if args.snapshots:
         saved = history_mod.list_snapshots()

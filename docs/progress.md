@@ -1,5 +1,48 @@
 # machine-monitor Progress
 
+## Session — 2026-09-30 — v2.5.0 (portless dev stacks, agent-session memory, a stranded fix landed)
+
+Asked to fold what had been learned in the field back into the skill. The gap list came from the
+memory notes of the "panas nih" sessions, not from the code: the biggest RAM finding of 2026-09-11
+(six `just dev-be` copies of one project, `pnpm → nest watch → dist/main`, 7-9 days old, ~4.5 GB,
+zero listening sockets) was structurally invisible to the tool, because SERVERS RUNNING, the
+stale-server alert and `--reclaim` are all built from the listener table. New
+`collect.detached_stacks` finds trees whose root is a dev runner by `comm` basename (configurable
+`[sessions] dev_runners`), was adopted by launchd (ppid 1), sits under a project root, is older than
+`stale_server_hours`, and holds no listener anywhere in the tree; memory is the whole tree's
+footprint. It feeds a NEEDS ATTENTION warn, the `--json` payload (`detached_stacks`) and a new
+DETACHED DEV STACKS table under `--reclaim`, which now signals every pid in the tree (supervisor
+included — killing a watcher's child only gets it respawned) with each pid's `lstart` re-checked by
+`refuse_reason`. Second addition: `collect.agent_sessions` counts outermost `claude`/`codex`/`cursor`/
+`windsurf` sessions with their descendants (the MCP servers are what closing a tab gives back) and
+reports at `agent_sessions_warn = 6` — report-only, since which tabs to close is the user's call.
+Building this surfaced two real bugs. `cwd_for_pids` went through `run()`, which returns '' on any
+non-zero exit, and `lsof` exits 1 whenever one pid in the batch is unreadable — so a single
+root-owned pid blanked every cwd; it is latent in the listener path today (non-root lsof only lists
+user-owned listeners) but the stack finder passes arbitrary launchd children, so it would have found
+nothing. Falsified: the old `run()` path returns '' for `[1, own pid]`, the new one resolves own pid.
+And the first cut of the finder took the runner name from argv split on a space, the same defect the
+stranded orphan fix below corrects — the new test's `Google Chrome` configurable-runner case failed
+on it, so both now read `comm`. Also landed that stranded work: uncommitted since 2026-08-16/20 and
+not included in the v2.4.0 commit, `orphan_automation` took `binary` from argv split on a space
+(so `--kill-orphans` refused its own targets for any Chrome helper path) and now passes the profile
+as argv mark; `tests/test_orphan_naming.py` covers it, plus the two reference sections linked from
+`gotcha-coding.md` E3/E6. Smaller: `_g` printed 47 MB as `0.0G` in the stale-server alert (now
+`M` below 1 GiB), and the footer's kill hints said `kill -9`, contradicting the SIGTERM-first
+contract. SKILL.md gains a "Where the memory actually is" section (measured ranking: orphaned
+browsers 5.8 GB, portless stacks 4.5 GB, agent sessions 5.28 GB, stale servers 81 MB — run
+`--orphans` before `--reclaim`), power draw instead of °C as the before/after heat figure
+(16,162 → 1,094 mW on 2026-08-26), and "a graceful quit under thrash takes minutes". Verified:
+`test_detached_stacks` all pass (finder + five lookalikes it must let through + configurable runner +
+agent count/threshold both sides + cwd with pid 1), `test_orphan_naming` pass, `test_grind_and_sessions`
+20/0, `test_clones` 27/0, `eval_scenarios` 11/11; live `--reclaim --dry-run` renders both tables and
+correctly excludes `just fe` (pid 6341, ppid 1) because its `node` child listens on :3512. The live
+machine had zero portless stacks today, so the positive path is proven only against the synthetic
+tree. Follow-up worth considering: `--reclaim` on a listening server still kills only the listener,
+leaving its `just`/`pnpm` supervisor alive.
+
+---
+
 ## Session — 2026-08-31 — v2.4.0 (a demo GIF for the README, generated rather than recorded)
 
 The README had no image, so the ask was a GIF of the dashboard for the repo front page. The first

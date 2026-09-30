@@ -49,7 +49,7 @@ machine-monitor --json               # machine-readable, every number already pa
 | `--kill-session <root-pid>` | Terminate one session by its root pid. Repeatable. Asks for typed confirmation. |
 | `--history [hours]` | Recorded trends with sparklines. Every run records one sample. |
 | `--save <name>` / `--diff <name>` / `--snapshots` | Compare the machine against a saved state. |
-| `--reclaim` | Terminate dev servers idle past the stale threshold. Asks for typed confirmation. |
+| `--reclaim` | Terminate dev servers idle past the stale threshold, plus detached dev stacks that hold no port. Asks for typed confirmation. |
 | `--kill-orphans` | Terminate leftover automation browsers. Asks for typed confirmation. |
 | `--check` | Evaluate alert thresholds once and send a macOS notification. |
 | `--watch-install [sec]` / `--watch-uninstall` / `--watch-status` | Background alert agent via launchd. |
@@ -92,6 +92,16 @@ anything else is reported with its pid.
 
 Corroborate with `sys` CPU time and `kernel_task` rather than temperature — a stuck daemon shows up
 there long before it shows up in degrees.
+
+**Quote power draw, not °C, as the before/after of a heat fix.** The die can sit at 46 °C and
+`Nominal` the whole time while the chassis is warm; what the user feels is watts. Measured
+2026-08-26: `thermal.cpu_mw` 16,162 → 1,094 mW after a cleanup, with the temperature reading
+unchanged — quoting °C would have made a 15x fix look like nothing. Load average is the other honest
+figure (20.66 → 2.18 the same day). Free RAM is not: macOS keeps it near zero before and after.
+
+**A graceful quit takes minutes on a thrashing machine, and that is not a hang.** Every process has
+to be paged back in from SSD just to be told to exit — Chrome went 167 → 161 processes in a full
+minute at 94% swap. Wait; do not escalate to SIGKILL on the assumption it is stuck.
 
 ## Apparent size is not disk space
 
@@ -141,6 +151,36 @@ replaces its shipped markers. Ships with `automation-browser` and `mcp-server`.
 
 Use `--sessions` to audit and `--kill-session <root-pid>` to remove one. Prefer this over
 `--kill-orphans` whenever some sessions must survive: `--kill-orphans` is all-or-nothing.
+
+## Where the memory actually is
+
+On this class of machine (16 GB, several agent sessions a day) exhaustion is almost never the user's
+browser. It is leftovers from sessions that have already ended, and the categories rank in the
+opposite order to how loudly they alert. Measured 2026-08-26:
+
+| Source | Found by | Measured |
+|---|---|---|
+| Orphaned automation browsers | `--orphans` / `--sessions` | 16 sessions, 5.8 GB |
+| Detached dev stacks, no port | NEEDS ATTENTION, `--reclaim` | 6 stacks, 4.5 GB (2026-09-11) |
+| Open agent sessions + MCP servers | NEEDS ATTENTION | 12 sessions, 5.28 GB (2026-08-16) |
+| Stale listening dev servers | `--reclaim` | 5 servers, 81 MB |
+
+**Run `--orphans` before `--reclaim`.** The stale-server alert is the loudest and recovered ~1.4% of
+what the orphan sweep did.
+
+**A dev stack that lost the port race is invisible to every listener-based view.** A second
+`just dev` keeps its whole `pnpm → nest watch → node` tree alive without ever binding, so SERVERS
+RUNNING and the stale-server alert cannot see it. `detached_stacks` finds trees whose root is a dev
+runner (`[sessions] dev_runners`), was adopted by launchd, sits under a project root, is past
+`stale_server_hours`, and holds no listener anywhere in the tree. `--reclaim` signals the whole
+tree, supervisor included — killing only a watcher's child gets it respawned — and re-checks each
+pid's `lstart` before the signal.
+
+**An agent session is not an orphan.** `--sessions` shows `gitnexus mcp` rows days old; all 13 seen
+on 2026-08-16 were children of live `claude` processes. The agent-session alert reports the count
+and combined memory (outermost session only, helpers included) once it reaches
+`agent_sessions_warn`, because closing idle tabs is then the biggest single lever — and it is the
+user's call, so the tool reports it and never kills it.
 
 ## Killing things
 
@@ -206,6 +246,11 @@ each paired with the lookalike it must let through — a fresh spike, a process 
 life, a leftover reparented to launchd, a binary whose name merely contains `claude`. Run it after
 any change to `grinding`, `mark_session_owned`, or the `--reclaim` candidate set.
 
+`python3 tests/test_detached_stacks.py` covers the portless-stack finder, the agent-session total,
+and `cwd_for_pids` surviving a root-owned pid in its batch (lsof exits 1 on any unreadable pid, and
+the old path dropped every answer with it). `python3 tests/test_orphan_naming.py` proves an orphan
+whose executable path contains spaces is still killable and a recycled pid is still refused.
+
 ## Additional resources
 
 - **`references/metrics.md`** — what every metric actually measures, and the wrong readings to avoid.
@@ -213,3 +258,4 @@ any change to `grinding`, `mark_session_owned`, or the `--reclaim` candidate set
 - **`tests/eval_scenarios.py`** — the failure-condition eval suite.
 - **`tests/test_clones.py`** — clone detection, removal guards, and the apparent-vs-real measurement.
 - **`tests/test_grind_and_sessions.py`** — stuck-daemon detection and the live-session kill guard.
+- **`tests/test_detached_stacks.py`** — portless leftovers, agent-session memory, foreign-pid cwd lookup.

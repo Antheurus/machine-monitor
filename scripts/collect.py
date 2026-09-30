@@ -677,10 +677,15 @@ def cwd_for_pids(pids: list[int]) -> dict[int, str]:
     """
     if not pids:
         return {}
-    out = run(
-        ["lsof", "-a", "-d", "cwd", "-F", "pn", "-p", ",".join(str(p) for p in pids)],
-        timeout=8,
-    )
+    # lsof exits 1 when any one pid is unreadable (root-owned), and run() drops
+    # stdout on a non-zero exit — so one foreign pid blanked every answer.
+    try:
+        out = subprocess.run(
+            ["lsof", "-a", "-d", "cwd", "-F", "pn", "-p", ",".join(str(p) for p in pids)],
+            capture_output=True, text=True, timeout=8, check=False,
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return {}
     result: dict[int, str] = {}
     pid = 0
     for line in out.splitlines():
@@ -1331,7 +1336,10 @@ def orphan_automation(procs: list[Process]) -> list[Orphan]:
             age_seconds=proc.age_seconds if proc else 0.0,
             memory=proc.memory if proc else 0,
             profile=profile,
-            binary=args.split(" ", 1)[0].rsplit("/", 1)[-1],
+            # From `ps comm=`, never argv split on a space: an executable path
+            # contains spaces, and a wrong name makes refuse_reason reject its
+            # own target. Empty falls the guard back to the profile mark.
+            binary=proc.name if proc else "",
         ))
     return sorted(found, key=lambda o: o.age_seconds, reverse=True)
 
@@ -1500,6 +1508,125 @@ def _session_detail(args: str, mark: str) -> str:
     return f"{mark} {tail}".strip()
 
 
+DEFAULT_DEV_RUNNERS: list[str] = [
+    "just", "make", "pnpm", "npm", "yarn", "bun", "bunx", "npx", "node", "deno",
+    "tsx", "nodemon", "air", "uvicorn",
+]
+
+
+@dataclass
+class DetachedStack:
+    pid: int
+    name: str
+    args: str
+    cwd: str
+    age_seconds: float
+    memory: int
+    pids: list[int]
+    starts: dict[int, str]
+
+
+def detached_stacks(procs: list[Process], cfg: dict, listener_pids: set[int],
+                    tree: dict[int, tuple[int, str]] | None = None,
+                    cwds: dict[int, str] | None = None,
+                    starts: dict[int, str] | None = None) -> list[DetachedStack]:
+    """Dev process trees whose session is gone and which hold no port.
+
+    A second `just dev` that loses the port race keeps its whole watch tree
+    alive anyway, and SERVERS RUNNING, the stale-server alert and --reclaim are
+    all built from listeners, so it is invisible to every one of them. Measured
+    2026-09-11: six such copies, 4.5 GB, 7-9 days old, zero sockets.
+
+    The root must be adopted by launchd (its launching shell or agent exited),
+    must be a dev runner by executable basename, must sit under a project root,
+    and must be older than the stale threshold. Memory is the whole tree's.
+    """
+    th = cfg.get("thresholds", {})
+    min_age = th.get("stale_server_hours", 24) * 3600
+    runners = {n.lower() for n in cfg.get("dev_runners", DEFAULT_DEV_RUNNERS)}
+    tree = tree if tree is not None else _ps_tree()
+    by_pid = {p.pid: p for p in procs}
+
+    candidates = []
+    for pid, (ppid, _) in tree.items():
+        if ppid != 1:
+            continue
+        # The name from `comm`, never argv split on a space: executable paths
+        # contain spaces, and "Google Chrome" would become "google".
+        proc = by_pid.get(pid)
+        if proc and proc.name.lower() in runners and proc.age_seconds >= min_age:
+            candidates.append(pid)
+    if not candidates:
+        return []
+
+    cwds = cwds if cwds is not None else cwd_for_pids(candidates)
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _) in tree.items():
+        children.setdefault(ppid, []).append(pid)
+
+    found: list[DetachedStack] = []
+    for root in candidates:
+        cwd, is_project = shorten_path(cwds.get(root, ""), cfg.get("project_roots", []))
+        if not is_project:
+            continue
+        members, stack = [root], [root]
+        while stack:
+            for child in children.get(stack.pop(), []):
+                members.append(child)
+                stack.append(child)
+        if listener_pids.intersection(members):
+            continue
+        if starts is None:
+            starts = _lstarts()
+        found.append(DetachedStack(
+            pid=root, name=by_pid[root].name, args=tree[root][1], cwd=cwd,
+            age_seconds=by_pid[root].age_seconds,
+            memory=sum(by_pid[m].memory for m in members if m in by_pid),
+            pids=members, starts={m: starts.get(m, "") for m in members},
+        ))
+    return sorted(found, key=lambda s: -s.memory)
+
+
+def _lstarts() -> dict[int, str]:
+    """pid -> lstart, so a kill can prove it is signalling the same instance."""
+    out = run(["ps", "-eo", "pid=,lstart="], timeout=8)
+    result: dict[int, str] = {}
+    for line in out.splitlines():
+        head, _, rest = line.strip().partition(" ")
+        if head.isdigit():
+            result[int(head)] = " ".join(rest.split())
+    return result
+
+
+def agent_sessions(procs: list[Process], cfg: dict) -> tuple[int, int]:
+    """(count, memory) of live agent CLI sessions, each with its descendants.
+
+    Only the outermost owner counts as a session, so an agent that spawns a
+    sub-agent of the same CLI is one session. Its MCP servers and helpers are
+    included: they are what closing the tab gives back. Measured 2026-08-16:
+    12 open Claude sessions at 5.28 GB, the largest single consumer on 16 GB.
+    """
+    owners = {n.lower() for n in cfg.get("session_owners", DEFAULT_SESSION_OWNERS)}
+    by_pid = {p.pid: p for p in procs}
+    is_owner = {p.pid for p in procs if p.name.lower() in owners}
+
+    def top_owner(pid: int) -> int:
+        top, cur, seen = 0, pid, set()
+        while cur > 1 and cur not in seen:
+            seen.add(cur)
+            if cur in is_owner:
+                top = cur
+            cur = by_pid[cur].ppid if cur in by_pid else 0
+        return top
+
+    totals: dict[int, int] = {}
+    for proc in procs:
+        root = top_owner(proc.pid)
+        if root:
+            totals[root] = totals.get(root, 0) + proc.memory
+    return len(totals), sum(totals.values())
+
+
 @dataclass
 class Alert:
     severity: str  # "crit" | "warn" | "info"
@@ -1512,6 +1639,7 @@ def attention(
     listener_list: list[Listener],
     procs: list[Process],
     cfg: dict,
+    stacks: list[DetachedStack] | None = None,
 ) -> list[Alert]:
     """The judgement layer: what a person should actually act on."""
     th = cfg.get("thresholds", {})
@@ -1582,8 +1710,26 @@ def attention(
             f"({oldest.age_seconds / 86400:.1f}d, {oldest.cwd})"
         )))
 
+    if stacks:
+        biggest = stacks[0]
+        alerts.append(Alert("warn", (
+            f"{len(stacks)} detached dev stack(s) with no port holding "
+            f"{_g(sum(s.memory for s in stacks))} — invisible to SERVERS RUNNING; "
+            f"largest is pid {biggest.pid} {biggest.name} "
+            f"({biggest.age_seconds / 86400:.1f}d, {biggest.cwd}). --reclaim removes them"
+        )))
+
+    count, held = agent_sessions(procs, cfg)
+    if count >= th.get("agent_sessions_warn", 6):
+        alerts.append(Alert("info", (
+            f"{count} agent sessions open holding {_g(held)} with their MCP servers — "
+            "closing idle ones is usually the biggest single RAM lever"
+        )))
+
     return alerts
 
 
 def _g(value: int) -> str:
+    if value < 2**30:
+        return f"{value / 2**20:.0f}M"
     return f"{value / 2**30:.1f}G"

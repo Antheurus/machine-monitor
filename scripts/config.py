@@ -122,6 +122,9 @@ def _parse(parser: configparser.ConfigParser) -> dict[str, Any]:
         owners = _split_list(parser.get("sessions", "owners", fallback=""))
         if owners:
             cfg["session_owners"] = owners
+        runners = _split_list(parser.get("sessions", "dev_runners", fallback=""))
+        if runners:
+            cfg["dev_runners"] = runners
 
     if parser.has_section("port_ranges"):
         for span, label in parser.items("port_ranges"):

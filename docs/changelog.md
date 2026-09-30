@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.5.0 — Finds the leftovers that were hiding from it
+
+- **Dev stacks that never got a port now show up.** When you start a dev server twice, the second
+  copy often loses the port but keeps running — sometimes for a week, holding gigabytes. It used to
+  be invisible everywhere in the dashboard. It now appears under NEEDS ATTENTION, and
+  `--reclaim` offers to stop it (the whole process tree, not just one piece that would restart).
+- **It tells you when open agent sessions are the memory problem.** Past six open Claude/Codex/
+  Cursor sessions it reports how many and how much memory they hold together with their helpers.
+  It never closes them for you — that is your call.
+- **Small memory figures read correctly.** An alert that said "holding 0.0G" for a 47 MB server now
+  says "28M" or whatever the real number is.
+- **The kill hints in the footer no longer suggest `kill -9`.** Plain `kill` lets a server shut
+  down cleanly; force-killing first can leave its port stuck.
+- **Killing a leftover automation browser whose app path has spaces in it now works** — it used to
+  be refused by the tool's own safety check.
+- New setting: `agent_sessions_warn` under `[thresholds]`, and `dev_runners` under `[sessions]` if
+  your stacks start from something other than just/pnpm/npm/bun/node and friends.
+
 ## v2.4.0 — The README now shows you what the tool looks like
 
 - **There is a demo GIF at the top of the README.** Previously you had to install it to find out

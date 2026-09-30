@@ -119,3 +119,13 @@ footer — a malformed user file is reported there and the shipped defaults are 
 silently ignoring what was written.
 
 Section names must match the shipped file exactly; a key under the wrong section is not applied.
+
+## Attributing a `com.apple.*` framework helper to the app that owns it
+
+_linked from ../rules/gotcha-coding.md of E6_
+
+Every app using Virtualization.framework (Docker Desktop, UTM's Apple-VZ mode, Podman, VirtualBuddy) presents as `com.apple.Virtualization.VirtualMachine`, so the reader silently substitutes whichever VM app they remember, and a stale memory note naming the wrong one makes the guess feel like a lookup. launchd reparents the helper to ppid 1, so the parent is a dead end too.
+
+**Attribute from the fd table**: `lsof -p <pid> -Fn`, and take the most frequently referenced `*.app` bundle outside `/System` — most-frequent rather than first-seen, since a helper incidentally opens a font or resource from an unrelated bundle.
+
+**Two traps in the fix.** `lsof` exits non-zero whenever any single fd is unreadable, so a `run()` wrapper that returns `''` on non-zero exit silently reports "no owner" — read stdout regardless of return code. And **keep the resolved owner in a NEW field, never rewrite the process name**: a kill path that re-reads `ps comm=` and compares it against its caller's copy will then refuse every kill with a fabricated `pid now belongs to X, not <decorated X>`. Render owner-first (`Docker · com.apple.Virtualization.VirtualMachine`) so the attribution survives column truncation.
