@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.6.0 — Warns when leftover test browsers stop your Chrome from opening
+
+- **If Chrome won't open from the Dock, the dashboard now tells you why.** Automated test browsers
+  left running after a session ends make macOS think Chrome is already open, so clicking the icon
+  brings up an invisible one instead of yours. NEEDS ATTENTION now flags these once they are over a
+  day old, with the command to close them.
+
 ## v2.5.1 — `--space` no longer hides a cache it cannot fully read
 
 - **Large caches stop disappearing from `--space`.** If a single file inside a folder couldn't be

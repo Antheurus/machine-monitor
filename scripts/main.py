@@ -53,6 +53,7 @@ class Monitor:
         "disk": 20.0,
         "listeners": 8.0,
         "windowserver": 15.0,
+        "browsers": 30.0,
         "footprints": 4.0,
         "thermal": 5.0,
         "memory": 0.0,
@@ -149,6 +150,7 @@ class Monitor:
 
         collect.mark_session_owned(visible, cfg)
         stacks = collect.detached_stacks(procs, cfg, {item.pid for item in listener_list})
+        browsers = self._cached("browsers", lambda: collect.leftover_browsers(procs, cfg))
 
         # Collected here rather than inside the render: the diagnosis shells out
         # to system_profiler and ps, and running that from a draw function put
@@ -199,7 +201,7 @@ class Monitor:
             "thermal": results["thermal"],
             "windowserver": windowserver,
             "stacks": stacks,
-            "alerts": collect.attention(mem, disk, visible, procs, cfg, stacks=stacks),
+            "alerts": collect.attention(mem, disk, visible, procs, cfg, stacks=stacks, browsers=browsers),
             "loadavg": os.getloadavg(),
         }
 

@@ -1,5 +1,26 @@
 # machine-monitor Progress
 
+## Session — 2026-09-30 (cont) — v2.6.0 (leftover automation browsers hijack the Chrome Dock icon)
+
+Found live while helping the user switch Chrome profiles: after their own Chrome was quit, clicking
+the Dock icon opened nothing. Launching the binary directly worked, `open -a` appeared to do nothing,
+and `pgrep -x "Google Chrome"` named three main processes that were playwright-cli daemon browsers
+(sessions `oto`, `oto2`, `aud3a`, 2.5-3.5 days old, daemon ppid 1, 18 processes, 1.6 GB) — macOS
+treated Chrome as already running and activated a windowless automation instance. Killing them via
+`--kill-session` (3 terminated, 15 already gone) fixed it immediately. The tool had no way to say
+this: `--orphans`/`--sessions` list these, but nothing in NEEDS ATTENTION connected them to a
+symptom. New `collect.leftover_browsers` keeps `automation-browser` sessions whose root is adopted
+by launchd and older than `stale_server_hours`; the snapshot computes it behind a 30s cache
+(`sessions()` shells out) and passes it to `attention(browsers=...)`, which raises a warn naming the
+Dock symptom and the kill command. Passed in rather than computed inside `attention` so the
+synthetic suites stay independent of whatever the real machine is running. Verified:
+`test_detached_stacks` extended with an adopted+stale session kept and a live-parent, a too-young
+and a non-browser family dropped, plus the alert reaching NEEDS ATTENTION — all pass; the other five
+suites green (space_sizes, orphan_naming, grind_and_sessions 20/0, clones 27/0, eval_scenarios
+11/11); live render shows no such alert now that the three are gone.
+
+---
+
 ## Session — 2026-09-30 (cont) — v2.5.1 (--space dropped any directory du could not fully read)
 
 A disk cleanup on the live machine found `~/Library/Caches/go-build` at 27.2 GB by a hand `du` pass,

@@ -1609,6 +1609,26 @@ def _lstarts() -> dict[int, str]:
     return result
 
 
+def leftover_browsers(procs: list[Process], cfg: dict,
+                      found: list[Session] | None = None) -> list[Session]:
+    """Automation browser sessions whose launching agent is gone.
+
+    Adopted by launchd and past the stale threshold. Beyond the memory, they
+    hijack the app: macOS sees "Google Chrome" already running, so clicking the
+    Dock icon with the user's own Chrome closed activates a windowless automation
+    instance instead of launching. Measured 2026-09-30: three playwright-cli
+    daemons, 2.5-3.5 days old, and "Chrome won't open" was the whole symptom.
+    """
+    min_age = cfg.get("thresholds", {}).get("stale_server_hours", 24) * 3600
+    by_pid = {p.pid: p for p in procs}
+    found = found if found is not None else sessions(procs, cfg)
+    return [
+        s for s in found
+        if s.family == "automation-browser" and s.root_pid in by_pid
+        and by_pid[s.root_pid].ppid == 1 and s.age_seconds >= min_age
+    ]
+
+
 def agent_sessions(procs: list[Process], cfg: dict) -> tuple[int, int]:
     """(count, memory) of live agent CLI sessions, each with its descendants.
 
@@ -1651,6 +1671,7 @@ def attention(
     procs: list[Process],
     cfg: dict,
     stacks: list[DetachedStack] | None = None,
+    browsers: list[Session] | None = None,
 ) -> list[Alert]:
     """The judgement layer: what a person should actually act on."""
     th = cfg.get("thresholds", {})
@@ -1728,6 +1749,14 @@ def attention(
             f"{_g(sum(s.memory for s in stacks))} — invisible to SERVERS RUNNING; "
             f"largest is pid {biggest.pid} {biggest.name} "
             f"({biggest.age_seconds / 86400:.1f}d, {biggest.cwd}). --reclaim removes them"
+        )))
+
+    if browsers:
+        alerts.append(Alert("warn", (
+            f"{len(browsers)} automation browser session(s) outlived their agent, holding "
+            f"{_g(sum(b.memory for b in browsers))} — while your own Chrome is closed, its Dock "
+            "icon activates one of these and no window opens. machine-monitor --sessions "
+            "automation-browser, then --kill-session <root>"
         )))
 
     count, held = agent_sessions(procs, cfg)

@@ -98,6 +98,21 @@ stack_alert = [a.text for a in collect.attention(mem, disk, [], [], {"thresholds
                if "detached dev stack" in a.text]
 check("a detached stack reaches NEEDS ATTENTION", len(stack_alert), 1)
 
+print("\nleftover_browsers() — only adopted, stale automation sessions")
+procs_b = [proc(700, 1, "node", age=3 * DAY), proc(710, 88, "node", age=3 * DAY),
+           proc(720, 1, "node", age=3600)]
+def sess(root, fam="automation-browser"):
+    return collect.Session(family=fam, root_pid=root, mark="", detail="", binary="node",
+                           age_seconds=next(p.age_seconds for p in procs_b if p.pid == root),
+                           memory=500 * 2**20)
+found_b = [sess(700), sess(710), sess(720), sess(700, fam="mcp-server")]
+left = collect.leftover_browsers(procs_b, CFG, found_b)
+check("adopted + stale kept, live parent / young / other family dropped",
+      [(s.root_pid, s.family) for s in left], [(700, "automation-browser")])
+hij = [a.text for a in collect.attention(mem, disk, [], [], {"thresholds": {}}, browsers=left)
+       if "Dock" in a.text]
+check("reaches NEEDS ATTENTION naming the Dock symptom", len(hij), 1)
+
 print("\ncwd_for_pids() — one unreadable pid must not blank the rest")
 mine = os.getpid()
 got = collect.cwd_for_pids([1, mine])

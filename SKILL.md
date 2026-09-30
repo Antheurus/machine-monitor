@@ -7,6 +7,7 @@ description: >
   "why is WindowServer high", "what can I delete", "free up disk space", "find stale dev servers",
   "why is System Data so big", "kenapa System Data gede banget", "apaan 180GB System Data",
   "panas nih", "kok panas padahal nggak ngapa-ngapain", "what's grinding in the background",
+  "chrome won't open", "chrome nggak bisa dibuka", "klik chrome nggak muncul apa-apa",
   or wants a system overview of their macOS machine. Also trigger proactively when the user asks to
   stop or restart a service and needs to identify its PID first. Reports real die temperature in °C,
   memory including compressed pages and swap, live per-process CPU, every listening port mapped to
@@ -164,6 +165,12 @@ opposite order to how loudly they alert. Measured 2026-08-26:
 | Detached dev stacks, no port | NEEDS ATTENTION, `--reclaim` | 6 stacks, 4.5 GB (2026-09-11) |
 | Open agent sessions + MCP servers | NEEDS ATTENTION | 12 sessions, 5.28 GB (2026-08-16) |
 | Stale listening dev servers | `--reclaim` | 5 servers, 81 MB |
+
+**A leftover automation browser also breaks the user's own Chrome.** macOS sees "Google Chrome"
+already running, so with the user's Chrome closed the Dock icon activates a windowless automation
+instance and nothing opens — reported as "Chrome won't open", with three 2.5-3.5-day-old
+playwright-cli daemons as the whole cause (2026-09-30). NEEDS ATTENTION names this once an
+automation session is adopted by launchd and past `stale_server_hours`.
 
 **Run `--orphans` before `--reclaim`.** The stale-server alert is the loudest and recovered ~1.4% of
 what the orphan sweep did.
