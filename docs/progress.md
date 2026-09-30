@@ -1,5 +1,27 @@
 # machine-monitor Progress
 
+## Session — 2026-09-30 (cont) — v2.5.1 (--space dropped any directory du could not fully read)
+
+A disk cleanup on the live machine found `~/Library/Caches/go-build` at 27.2 GB by a hand `du` pass,
+while `--space` had not listed it at all even though it is in the scanner's cache list. Root cause is
+the same class as the `cwd_for_pids` fix earlier today: `_dir_size` went through `run()`, which
+returns '' on any non-zero exit, and `du` exits 1 on a single unreadable entry while still printing
+a valid total — so the size read as 0, fell under the 50 MB floor, and the biggest item on the disk
+vanished from the report. Reproduced on a 58 MB directory holding one `chmod 000` child (du rc=1,
+`_dir_size` -> 0). `_dir_size` now reads stdout regardless of exit code, with the timeout raised
+90 -> 240s for trees of millions of small files. `tests/test_space_sizes.py` proves it and was
+falsified against the pre-fix `collect.py` (stashed): FAIL 0 bytes there, PASS 8388608 after. This
+is the third time in the codebase `run()` has swallowed a valid lsof/du answer (after `owner_app`
+and `cwd_for_pids`), so its docstring now says never to use it for either; the remaining callers
+were swept — `clones.py` and `owner_app` already read stdout directly, and `listeners()` exits 0
+(an empty result there is a genuine no-match). The cleanup itself: `go clean -cache`, `bun pm cache
+rm`, `pnpm store prune` and `brew cleanup -s` took free space 46.64 -> 77.61 GB by statvfs;
+`npm cache clean` refused on root-owned files and needs `sudo chown` from the user. All suites
+green: space_sizes, detached_stacks, orphan_naming, grind_and_sessions 20/0, clones 27/0,
+eval_scenarios 11/11.
+
+---
+
 ## Session — 2026-09-30 — v2.5.0 (portless dev stacks, agent-session memory, a stranded fix landed)
 
 Asked to fold what had been learned in the field back into the skill. The gap list came from the

@@ -25,7 +25,12 @@ from pathlib import Path
 
 
 def run(cmd: list[str], timeout: float = 5.0) -> str:
-    """Run a command and return stdout, or '' on any failure."""
+    """Run a command and return stdout, or '' on any failure.
+
+    Never for lsof or du: both exit 1 on one unreadable entry while printing a
+    valid answer, and this drops it. That hid every cwd (cwd_for_pids) and a
+    27 GB cache (_dir_size) before each was moved off it.
+    """
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False
@@ -1263,7 +1268,13 @@ def _find_dirs(base: Path, names: set[str], depth: int) -> list[Path]:
 
 
 def _dir_size(path: Path) -> int:
-    out = run(["du", "-sk", str(path)], timeout=90)
+    # du exits 1 on any one unreadable entry yet still prints the total; run()
+    # would drop it, and a 27 GB go-build cache vanished from --space that way.
+    try:
+        out = subprocess.run(["du", "-sk", str(path)], capture_output=True,
+                             text=True, timeout=240, check=False).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
     parts = out.split()
     return int(parts[0]) * 1024 if parts and parts[0].isdigit() else 0
 

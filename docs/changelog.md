@@ -1,5 +1,11 @@
 # Changelog
 
+## v2.5.1 — `--space` no longer hides a cache it cannot fully read
+
+- **Large caches stop disappearing from `--space`.** If a single file inside a folder couldn't be
+  read, the whole folder was left off the report — a 27 GB Go build cache went missing that way, and
+  it turned out to be the biggest thing on the disk. It is listed now.
+
 ## v2.5.0 — Finds the leftovers that were hiding from it
 
 - **Dev stacks that never got a port now show up.** When you start a dev server twice, the second
