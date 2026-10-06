@@ -1038,6 +1038,18 @@ class Finding:
     severity: str  # "cause" | "factor" | "ok"
 
 
+def running_recorders(ps_output: str) -> list[str]:
+    # Whole executable name, never a substring of the path: "OBS" is inside "Obsidian".
+    names = set()
+    for line in ps_output.splitlines():
+        comm = line.strip().partition(" ")[2]
+        names.add(comm.rsplit("/", 1)[-1].lower())
+    return [
+        app for app in _RECORDER_APPS
+        if any(n == app.lower() or n.startswith(app.lower() + " ") for n in names)
+    ]
+
+
 def windowserver_diagnosis(ps_output: str) -> list[Finding]:
     """Live checks for why WindowServer is busy.
 
@@ -1079,11 +1091,16 @@ def windowserver_diagnosis(ps_output: str) -> list[Finding]:
     else:
         findings.append(Finding("Video decode", "none", "not decoding video", "ok"))
 
-    recording = [app for app in _RECORDER_APPS if app.lower() in ps_output.lower()]
+    recording = running_recorders(ps_output)
     capture = run(["pgrep", "-x", "screencaptureui"], timeout=3).strip()
-    if recording or capture:
+    if capture:
         label = ", ".join(recording) or "screen capture active"
         findings.append(Finding("Screen recording", label, "CAUSE: screen is being captured", "cause"))
+    elif recording:
+        findings.append(Finding(
+            "Screen recording", ", ".join(recording),
+            "FACTOR: recorder app is open, capturing only if it is recording", "factor",
+        ))
     else:
         findings.append(Finding("Screen recording", "none detected", "no known recorder running", "ok"))
 
