@@ -1213,6 +1213,9 @@ def reclaimable(cfg: dict, project_depth: int = 3) -> list[SpaceItem]:
     """
     items: list[SpaceItem] = []
 
+    # uv on macOS defaults to ~/.cache/uv, not ~/Library/Caches/uv; ask it.
+    uv_cache = run(["uv", "cache", "dir"], timeout=5.0).strip() if shutil.which("uv") else ""
+
     caches = [
         ("~/Library/Caches/ms-playwright", "browser cache", "npx playwright install to restore"),
         ("~/Library/Caches/ms-playwright-go", "browser cache", ""),
@@ -1225,7 +1228,7 @@ def reclaimable(cfg: dict, project_depth: int = 3) -> list[SpaceItem]:
         ("~/Library/Developer/CoreSimulator/Caches", "build cache", ""),
         ("~/.gradle/caches", "build cache", ""),
         ("~/Library/Caches/go-build", "build cache", "go clean -cache"),
-        ("~/Library/Caches/uv", "package cache", "uv cache clean"),
+        (uv_cache or "~/.cache/uv", "package cache", "uv cache prune"),
     ]
     for raw, kind, note in caches:
         path = Path(raw).expanduser()

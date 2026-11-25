@@ -257,6 +257,8 @@ any change to `grinding`, `mark_session_owned`, or the `--reclaim` candidate set
 and `cwd_for_pids` surviving a root-owned pid in its batch (lsof exits 1 on any unreadable pid, and
 the old path dropped every answer with it). `python3 tests/test_orphan_naming.py` proves an orphan
 whose executable path contains spaces is still killable and a recycled pid is still refused.
+`python3 tests/test_space_uv.py` proves `--space` finds the uv cache at the path `uv cache dir`
+reports, never a guessed one — the hardcoded `~/Library/Caches/uv` hid an 18 GB `~/.cache/uv`.
 
 ## Additional resources
 

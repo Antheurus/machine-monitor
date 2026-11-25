@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.6.1 — `--space` now shows the uv cache
+
+- **The Python package cache from `uv` now appears in the reclaimable-space list.** It was being
+  looked for in the wrong folder, so on this Mac an 18 GB cache never showed up. The list now asks
+  `uv` where its cache is and suggests `uv cache prune` to clear it.
+
+
 ## v2.6.0 — Warns when leftover test browsers stop your Chrome from opening
 
 - **If Chrome won't open from the Dock, the dashboard now tells you why.** Automated test browsers

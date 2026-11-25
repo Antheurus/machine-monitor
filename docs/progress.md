@@ -1,5 +1,12 @@
 # machine-monitor Progress
 
+## Session — 2026-11-26 — v2.6.1 (--space missed the uv cache)
+
+A disk cleanup on the user's Mac (95% full) found `~/.cache/uv` at 18 GB, the largest single cache on the machine, absent from `--space`. Root cause: `reclaimable()` in `scripts/collect.py` hardcoded `~/Library/Caches/uv`, but uv on macOS defaults to `~/.cache/uv` (XDG layout), so the entry silently failed its `is_dir()` check. Fix: ask uv itself with `uv cache dir` (5 s timeout via `run`, instant in practice) and fall back to `~/.cache/uv` when uv is not installed; the hint changed from `uv cache clean` to `uv cache prune`, because clean wipes environments a running `uv run` still uses, and on this machine `batasd` keeps a long-lived `uv run` holding the cache lock (a plain prune waits 300 s on it and fails; `--force` was needed). New `tests/test_space_uv.py` stubs `uv cache dir` to a temp dir with a 60 MB file and asserts the item, its size and its hint; it failed on the old code (empty list) and passes on the new. Full suite (`eval_scenarios`, clones, grind/sessions, detached stacks, orphan naming, recorder detection, space sizes) all exit 0, and a live `--space` lists `~/.cache/uv` at 6.8 G after the cleanup. Not touched: the uncommitted edits in `references/metrics.md` and `references/troubleshooting.md` dated 2026-11-22, which belong to another session.
+
+---
+
+
 ## Session — 2026-09-30 (cont) — v2.6.0 (leftover automation browsers hijack the Chrome Dock icon)
 
 Found live while helping the user switch Chrome profiles: after their own Chrome was quit, clicking
